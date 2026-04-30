@@ -82,6 +82,27 @@ class TipTapConverter
      */
     public bool $injectHeaderFooter = true;
 
+    /**
+     * Documents this converter's preferred numeral system. Not consulted
+     * inside convertFile() — substitution is done as a post-process pass
+     * via the public static {@see TipTapConverter::applyArabicIndicNumerals()}
+     * helper, which the caller (e.g. run.php) invokes against the returned
+     * doc tree. Kept as a property so callers have one place to read the
+     * default policy ("Arabic docs ⇒ Arabic-Indic everywhere").
+     */
+    public bool $arabicIndicNumerals = true;
+
+    /**
+     * Drop all empty paragraphs from the converter's output. Word documents
+     * pad with empty paragraphs for vertical layout (e.g. 7 spacers between
+     * the cover header and the cover title); in a flowing TipTap doc those
+     * stack as visible whitespace. Vertical rhythm is meant to come from
+     * `attrs.marginTop`/`marginBottom` on the surrounding non-empty
+     * paragraphs (see `paragraphMargins()`), not from empty `<p>` nodes.
+     * Set to false to preserve them.
+     */
+    public bool $dropEmptyParagraphs = true;
+
     /** @var RawXmlIndex|null populated by convertFile() when raw-XML features are enabled. */
     private ?RawXmlIndex $rawIndex = null;
 
@@ -127,18 +148,32 @@ class TipTapConverter
 
     /**
      * Build the corp-header band that appears at the top of every reference
-     * page: a logo placeholder ("شعار الجهة") followed by the country / agency
-     * / form-name lines from word/header2.xml. Text-only — the actual logo is
-     * a DrawingML shape we don't try to render.
+     * page: a logo (or "شعار الجهة" placeholder) followed by the country /
+     * agency / form-name lines from word/header2.xml. When the source has
+     * an embedded picture in any header part, `RawXmlIndex::extractHeaderLogo()`
+     * surfaces it on `headerLogo` and the logo line is replaced with a real
+     * `image` node; otherwise the dark-background placeholder text is kept.
      */
     private function buildHeaderNodes(): array
     {
         if ($this->rawIndex === null || empty($this->rawIndex->headerLines)) return [];
+        $logo = $this->rawIndex->headerLogo;
         $nodes = [];
         foreach ($this->rawIndex->headerLines as $line) {
             $text = $line['text'];
             if ($text === '') continue;
             $isLogoPlaceholder = ($text === 'شعار الجهة');
+            if ($isLogoPlaceholder && is_array($logo) && !empty($logo['src'])) {
+                $imgAttrs = ['src' => $logo['src'], 'alt' => 'شعار الجهة'];
+                if (!empty($logo['width']))  $imgAttrs['width']  = (int) $logo['width'];
+                if (!empty($logo['height'])) $imgAttrs['height'] = (int) $logo['height'];
+                $nodes[] = [
+                    'type' => 'paragraph',
+                    'attrs' => ['textAlign' => 'left', 'dir' => 'rtl'],
+                    'content' => [['type' => 'image', 'attrs' => $imgAttrs]],
+                ];
+                continue;
+            }
             $textNode = ['type' => 'text', 'text' => $text];
             if ($isLogoPlaceholder) {
                 $textNode['marks'] = [[
@@ -212,11 +247,45 @@ class TipTapConverter
     }
 
     /**
+     * Walk a converted doc tree and replace Latin digits (0-9) in every
+     * `text` node's `text` field with Arabic-Indic digits (٠-٩). This is a
+     * post-process pass meant to be invoked by callers after convertFile()
+     * returns — it deliberately lives outside the conversion pipeline so
+     * the converter doesn't need to know about numeral systems and so the
+     * substitution can be enabled/disabled per-document by the caller.
+     *
+     * Substitution is unconditional: heading-number prefixes, TOC page
+     * columns, body-text run contents — anything whose `type` is `text`
+     * gets digits remapped. The caller decides whether to run this pass
+     * based on document language / `arabicIndicNumerals` policy.
+     */
+    public static function applyArabicIndicNumerals(array $doc): array
+    {
+        $map = [
+            '0' => '٠', '1' => '١', '2' => '٢', '3' => '٣', '4' => '٤',
+            '5' => '٥', '6' => '٦', '7' => '٧', '8' => '٨', '9' => '٩',
+        ];
+        $walk = function (&$n) use (&$walk, $map) {
+            if (!is_array($n)) return;
+            if (($n['type'] ?? null) === 'text' && isset($n['text']) && is_string($n['text'])) {
+                $n['text'] = strtr($n['text'], $map);
+            }
+            if (isset($n['content']) && is_array($n['content'])) {
+                foreach ($n['content'] as &$c) $walk($c);
+                unset($c);
+            }
+        };
+        $walk($doc);
+        return $doc;
+    }
+
+    /**
      * Build TipTap nodes for the TOC the source document carries. Emits a
      * heading for "الفهرس" (or whatever the localised TOCHeading paragraph
-     * said) followed by one bullet-list per Heading-level: each list item
-     * holds a paragraph whose content is `<number> <space> <link to anchor>
-     * <leader dots> <page-number>`.
+     * said) followed by one paragraph per entry. Each entry paragraph carries
+     * `attrs.styleName="TOC1"` (or `"TOC3"`) so the sandbox CSS can lay it
+     * out as a flex row: number + linked title on the right, growing leader
+     * dots in the middle, page number on the left. Indent grows with depth.
      */
     private function buildTocNodes(): array
     {
@@ -226,52 +295,68 @@ class TipTapConverter
         if ($tocHeading) {
             $nodes[] = [
                 'type' => 'heading',
-                'attrs' => ['level' => 1, 'textAlign' => 'center', 'dir' => 'rtl'],
+                'attrs' => ['level' => 1, 'textAlign' => 'right', 'dir' => 'rtl', 'styleName' => 'TOCHeading'],
                 'content' => [['type' => 'text', 'text' => $tocHeading]],
             ];
         }
-        // Group entries into one bulletList per top-level (level=1) entry to
-        // mirror the source's nested structure: each top-level TOC1 entry
-        // owns the contiguous TOC3 entries that follow it. For simplicity
-        // we emit a single flat bulletList; nesting can come in a later iter.
-        $list = ['type' => 'bulletList', 'attrs' => ['dir' => 'rtl'], 'content' => []];
         foreach ($this->rawIndex->tocEntries as $e) {
-            $itemContent = [];
+            $level = max(1, (int) ($e['level'] ?: 1));
+            $styleName = 'TOC' . $level;
+            $content = [];
+            // Number prefix (e.g. "1.") — bold-styled inline so RTL renders
+            // ordered with title; appears on the right edge in flex row.
             if (!empty($e['number'])) {
-                $itemContent[] = ['type' => 'text', 'text' => $e['number'] . ' '];
+                $num = $e['number'];
+                if (!preg_match('#[.)]\s*$#u', $num)) $num .= '.';
+                $content[] = [
+                    'type' => 'text',
+                    'text' => $num . ' ',
+                    'marks' => [['type' => 'bold']],
+                ];
             }
-            // Hyperlinked title
-            $linkMarks = [];
-            $href = '#' . ($e['anchor'] ?? '');
-            if ($e['anchor']) {
-                $linkMarks[] = [
+            // Linked title.
+            $titleMarks = [];
+            if (!empty($e['anchor'])) {
+                $titleMarks[] = [
                     'type' => 'link',
-                    'attrs' => ['href' => $href, 'target' => '_self', 'rel' => 'noopener'],
+                    'attrs' => [
+                        'href' => '#' . $e['anchor'],
+                        'target' => '_self',
+                        'rel' => 'noopener',
+                    ],
                 ];
             }
             $titleNode = ['type' => 'text', 'text' => $e['text']];
-            if ($linkMarks) $titleNode['marks'] = $linkMarks;
-            $itemContent[] = $titleNode;
-            if (!empty($e['page'])) {
-                // Leader dots + page number (right-aligned via tab in Word; we use a separator).
-                $itemContent[] = ['type' => 'text', 'text' => ' … ' . $e['page']];
-            }
-            $listItem = [
-                'type' => 'listItem',
-                'attrs' => ['dir' => 'rtl'],
-                'content' => [[
-                    'type' => 'paragraph',
-                    'attrs' => ['textAlign' => null, 'dir' => 'rtl', 'indent' => $e['level'] > 1 ? ($e['level'] - 1) * 24 : null],
-                    'content' => $itemContent,
-                ]],
+            if ($titleMarks) $titleNode['marks'] = $titleMarks;
+            $content[] = $titleNode;
+            // Leader dots — a literal text run tagged via a textStyle mark
+            // with a sentinel `fontFamily` value the sandbox recognises as
+            // "render this span as a flex-grow leader dot strip". We avoid
+            // adding a new node type so the JSON stays vanilla TipTap.
+            $content[] = [
+                'type' => 'text',
+                'text' => "\u{2009}", // narrow space placeholder; CSS draws the dots
+                'marks' => [['type' => 'textStyle', 'attrs' => ['fontFamily' => '__toc_leader__']]],
             ];
-            // Drop indent if null
-            if ($listItem['content'][0]['attrs']['indent'] === null) {
-                unset($listItem['content'][0]['attrs']['indent']);
+            // Page number.
+            if (!empty($e['page'])) {
+                $content[] = [
+                    'type' => 'text',
+                    'text' => $e['page'],
+                    'marks' => [['type' => 'textStyle', 'attrs' => ['fontFamily' => '__toc_page__']]],
+                ];
             }
-            $list['content'][] = $listItem;
+            $attrs = [
+                'dir' => 'rtl',
+                'styleName' => $styleName,
+            ];
+            if ($level > 1) $attrs['indent'] = ($level - 1) * 24;
+            $nodes[] = [
+                'type' => 'paragraph',
+                'attrs' => $attrs,
+                'content' => $content,
+            ];
         }
-        if (!empty($list['content'])) $nodes[] = $list;
         return $nodes;
     }
 
@@ -329,7 +414,24 @@ class TipTapConverter
             $i++;
         }
 
+        if ($this->dropEmptyParagraphs) {
+            $out = array_values(array_filter($out, fn($n) => !$this->isEmptyParagraph($n)));
+        }
+
         return $out;
+    }
+
+    /**
+     * True for `type=paragraph` nodes with no content (or an empty content
+     * array). Used by the empty-paragraph drop pass — vertical spacing in
+     * the converted doc comes from `attrs.marginTop`/`marginBottom` on
+     * surrounding non-empty paragraphs, not from empty `<p>` nodes.
+     */
+    private function isEmptyParagraph($n): bool
+    {
+        return is_array($n)
+            && ($n['type'] ?? null) === 'paragraph'
+            && empty($n['content']);
     }
 
     private function elementHasTopBorder($el): bool
@@ -409,8 +511,14 @@ class TipTapConverter
     {
         $headingText = $this->joinText($content);
         $attrs = ['level' => $level] + $this->paragraphAttrs($pStyle);
+        if (is_object($pStyle) && method_exists($pStyle, 'getStyleName')) {
+            $sn = (string) $pStyle->getStyleName();
+            if ($sn !== '') $attrs['styleName'] = $sn;
+        }
+        $headingColor = $this->dominantTextColor($content);
+        if ($headingColor !== null) $attrs['color'] = $headingColor;
         if ($this->emitBookmarkIds && $this->rawIndex !== null) {
-            $anchor = $this->rawIndex->textToAnchor[$headingText] ?? null;
+            $anchor = $this->rawIndex->consumeAnchor($headingText);
             if ($anchor !== null) $attrs['id'] = $anchor;
         }
         if ($this->prefixHeadingNumbers && $this->rawIndex !== null) {
@@ -502,6 +610,41 @@ class TipTapConverter
         return false;
     }
 
+    /**
+     * Inspect the first text-bearing node and return its textStyle.color,
+     * lowercased to hex. Returns null when no color is set or when text
+     * nodes disagree on color (heading is a mix — leave it inline-only).
+     */
+    private function dominantTextColor(array $nodes): ?string
+    {
+        $found = null;
+        $stack = $nodes;
+        while ($stack) {
+            $n = array_shift($stack);
+            if (!is_array($n)) continue;
+            if (($n['type'] ?? null) === 'text' && trim((string) ($n['text'] ?? '')) !== '') {
+                $color = null;
+                foreach ($n['marks'] ?? [] as $m) {
+                    if (($m['type'] ?? null) === 'textStyle') {
+                        $color = $m['attrs']['color'] ?? null;
+                        break;
+                    }
+                }
+                if ($color === null) return null;
+                $color = strtolower($color);
+                if ($found === null) {
+                    $found = $color;
+                } elseif ($found !== $color) {
+                    return null;
+                }
+            }
+            if (isset($n['content']) && is_array($n['content'])) {
+                foreach ($n['content'] as $c) $stack[] = $c;
+            }
+        }
+        return $found;
+    }
+
     /** Concatenate all `text` strings in a list of inline nodes. */
     private function joinText(array $nodes): string
     {
@@ -529,7 +672,13 @@ class TipTapConverter
             $pStyle = $text->getParagraphStyle();
         }
 
-        return $this->buildHeadingNode($level, $content, $pStyle);
+        $node = $this->buildHeadingNode($level, $content, $pStyle);
+        // PHPWord's `Title` element corresponds to Word's "Title" pStyle
+        // (cover banner) when no other paragraph styleName surfaced.
+        if (!isset($node['attrs']['styleName'])) {
+            $node['attrs']['styleName'] = 'Title';
+        }
+        return $node;
     }
 
     /** Walk a TextRun's inline children into TipTap text/hardBreak/link/image nodes. */

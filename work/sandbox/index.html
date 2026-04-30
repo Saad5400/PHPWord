@@ -58,6 +58,146 @@
   #page h4 { font-size: 1.1em; margin: 0.6em 0 0.4em; line-height: 1.3; }
   #page h5 { font-size: 1em; margin: 0.6em 0 0.4em; line-height: 1.3; font-weight: 700; }
   #page h6 { font-size: 0.9em; margin: 0.6em 0 0.4em; line-height: 1.3; font-weight: 700; }
+
+  /* ----- Heading style mapping (mirrors Word style ids) ----- */
+
+  /* Cover-page Title: big, centered, black-bold, with rule below. */
+  #page h1[data-style="Title"] {
+    font-size: 2.6em;
+    text-align: center;
+    color: #111;
+    font-weight: 800;
+    margin: 1.4em 0 0.6em;
+  }
+
+  /* Heading1 default: dark-red (#602320) banner-style, centered, with hr above and below.
+     This matches the "القسم الأول" / "القسم الثاني" / "ملاحظة وتنويه:" treatment. */
+  #page h1[data-style="Heading1"] {
+    color: #602320;
+    text-align: center;
+    font-weight: 800;
+    font-size: 1.85em;
+    border-top: 1px solid #602320;
+    border-bottom: 1px solid #602320;
+    padding: 0.35em 0;
+    margin: 1em 0 0.7em;
+  }
+
+  /* TOC heading "الفهرس": dark-red, right-aligned (RTL), no rule lines —
+     the reference puts it as a quiet section title above the entry list. */
+  #page h1[data-style="TOCHeading"] {
+    color: #602320;
+    font-weight: 800;
+    font-size: 1.85em;
+    margin: 1em 0 0.7em;
+  }
+
+  /* When the source carried an explicit run-level color the converter lifts
+     it to attrs.color → inline style; that overrides the default red above
+     so the same CSS rule works for the blue "دليل الاستخدام" and the black
+     centered banners "وثيقة العقد الأساسية" / "شروط العقد".
+     For black-coded ones we want a softer treatment (no rule lines).
+  */
+  #page h1[data-style="Heading1"][style*="color: #000000"],
+  #page h1[data-style="Heading1"][style*="color:#000000"] {
+    border-top: none;
+    border-bottom: none;
+    padding: 0;
+    font-size: 2.1em;
+  }
+
+  /* Blue Heading1 (دليل الاستخدام / similar) — centered, blue, no rule. */
+  #page h1[data-style="Heading1"][style*="color: #0070c0"],
+  #page h1[data-style="Heading1"][style*="color:#0070c0"] {
+    border-top: none;
+    border-bottom: none;
+    padding: 0;
+    font-size: 1.7em;
+  }
+
+  /* Heading3: smaller bold, dark-red default, with hr above (handled by
+     the converter's pBdr emit). When a child run carries red (#FF0000)
+     the inline color overrides; when no color is set, fall back to the
+     style default. */
+  #page h3[data-style="Heading3"] {
+    color: #602320;
+    font-weight: 700;
+    font-size: 1.15em;
+  }
+
+  /* Red callout H3 (e.g. "ملاحظة وتنويه:") — centered, red, no border. */
+  #page h3[data-style="Heading3"][style*="color: #ff0000"],
+  #page h3[data-style="Heading3"][style*="color:#ff0000"] {
+    text-align: center;
+    color: #ff0000;
+  }
+
+  /* ----- TOC entries ----- */
+  /* Each TOC paragraph is a flex row: title on the right (RTL flex-start),
+     a stretchy leader-dots strip in the middle, page number on the left.
+     The leader is drawn by `.toc-leader::before` with overflow hidden so a
+     long string of dots fills whatever horizontal space remains.
+  */
+  #page p[data-style^="TOC"] {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4em;
+    margin: 0.18em 0;
+    line-height: 1.4;
+  }
+  /* TOC1 entries (top-level: section banner titles) — slightly bolder,
+     no extra start-padding. */
+  #page p[data-style="TOC1"] {
+    font-weight: 700;
+    padding-inline-start: 0;
+  }
+  /* TOC3 entries (numbered sub-section titles) — lighter weight, indented. */
+  #page p[data-style="TOC3"] {
+    font-weight: 400;
+  }
+  /* The leader dots strip — flex-grow fills available width.  We render the
+     dots via ::before so the actual text content (a thin space) stays out
+     of selection / accessibility surface. */
+  #page p[data-style^="TOC"] .toc-leader {
+    flex: 1 1 auto;
+    overflow: hidden;
+    white-space: nowrap;
+    color: #888;
+    direction: ltr;
+    /* visually hide the inline thin-space content */
+    text-indent: -9999px;
+    position: relative;
+    align-self: stretch;
+    min-width: 1em;
+  }
+  #page p[data-style^="TOC"] .toc-leader::before {
+    content: "...........................................................................................................................................................................................";
+    position: absolute;
+    inset: 0;
+    text-indent: 0;
+    color: #aaa;
+    font-family: serif;
+    letter-spacing: 0.15em;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  /* Page number: small, slightly muted. */
+  #page p[data-style^="TOC"] .toc-page {
+    flex: 0 0 auto;
+    color: #444;
+    font-variant-numeric: tabular-nums;
+    min-width: 1.5em;
+    text-align: right;
+  }
+  /* TOC link styling — match body link, but no underline (reference is plain). */
+  #page p[data-style^="TOC"] a {
+    color: inherit;
+    text-decoration: none;
+  }
+  #page p[data-style^="TOC"] a:hover {
+    text-decoration: underline;
+  }
+
   #page p { margin: 0.4em 0; }
   #page ul, #page ol { padding-inline-start: 2em; margin: 0.4em 0; }
   #page li { margin: 0.15em 0; }
@@ -215,6 +355,16 @@
     },
     textStyle: (m) => {
       const a = m.attrs || {};
+      // Sentinel fontFamily values used by the converter to mark TOC entry
+      // sub-spans. Render them as classed spans the CSS targets — the inline
+      // text content is just a placeholder; the visual leader dots are drawn
+      // by `.toc-leader::before`.
+      if (a.fontFamily === '__toc_leader__') {
+        return { tag: 'span', attrs: { class: 'toc-leader', 'aria-hidden': 'true' } };
+      }
+      if (a.fontFamily === '__toc_page__') {
+        return { tag: 'span', attrs: { class: 'toc-page' } };
+      }
       const decls = [];
       if (a.color)           decls.push(`color: ${a.color}`);
       if (a.fontSize)        decls.push(`font-size: ${a.fontSize}`);
@@ -258,6 +408,7 @@
       decls.push(`padding-inline-start: ${v}`);
     }
     if (a.backgroundColor) decls.push(`background-color: ${a.backgroundColor}`);
+    if (a.color && node.type === 'heading') decls.push(`color: ${a.color}`);
     return decls.length ? decls.join('; ') : null;
   }
 
@@ -266,6 +417,7 @@
     const out = { ...extra };
     if (a.id) out.id = a.id;
     if (a.dir) out.dir = a.dir;
+    if (a.styleName) out['data-style'] = a.styleName;
     const style = styleFromBlockAttrs(node);
     if (style) out.style = style;
     return out;

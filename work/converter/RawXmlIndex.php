@@ -28,6 +28,15 @@ class RawXmlIndex
     /** @var array<string,string> heading text (joined) → bookmark anchor name. */
     public array $textToAnchor = [];
 
+    /**
+     * @var array<string,list<string>> heading text → ordered list of anchors.
+     * When the same heading text appears twice (e.g. "موقع العمل" appears as
+     * Heading3 in two different sections), the TOC has two distinct entries
+     * pointing to two distinct anchors. The converter consumes from this
+     * list in document order so the Nth occurrence resolves to the Nth anchor.
+     */
+    public array $textToAnchors = [];
+
     /** @var array<string,string> heading text → computed multi-level number ("1.", "1.2.", "2.1.3."). */
     public array $headingNumbers = [];
 
@@ -50,6 +59,17 @@ class RawXmlIndex
      */
     public array $footerLines = [];
 
+    /**
+     * The first embedded image found in any header part, encoded as a TipTap-
+     * ready data URL plus pixel dimensions. When the source's "logo box" is a
+     * real image (`<a:blip r:embed>`) this carries it; when the box is a
+     * DrawingML shape with no embedded image (as in التشغيل-والصيانة.docx),
+     * this stays null and the converter falls back to a text placeholder.
+     *
+     * @var array{src:string,width:?int,height:?int}|null
+     */
+    public ?array $headerLogo = null;
+
     public function __construct(string $docxPath)
     {
         $zip = new \ZipArchive();
@@ -61,8 +81,15 @@ class RawXmlIndex
         // because that's what every page after the cover uses; for this doc all
         // three header variants share the same logo block. Footer1.xml is the
         // default footer.
-        $headerXml = (string) ($zip->getFromName('word/header2.xml') ?: $zip->getFromName('word/header1.xml') ?: '');
+        $headerName = null;
+        foreach (['word/header2.xml', 'word/header1.xml', 'word/header3.xml'] as $candidate) {
+            if ($zip->locateName($candidate) !== false) { $headerName = $candidate; break; }
+        }
+        $headerXml = $headerName !== null ? (string) $zip->getFromName($headerName) : '';
         $footerXml = (string) ($zip->getFromName('word/footer1.xml') ?: '');
+        if ($headerName !== null && $headerXml !== '') {
+            $this->headerLogo = $this->extractHeaderLogo($zip, $headerName, $headerXml);
+        }
         $zip->close();
 
         $this->splitParagraphs();
@@ -73,18 +100,37 @@ class RawXmlIndex
         if ($footerXml !== '') $this->footerLines = $this->extractPartLines($footerXml, false);
         // Populate heading numbers from the TOC field's rendered output
         // (Word stamped the multi-level numbers there at last regen).
+        // The TOC is the AUTHORITATIVE source for which anchor a heading
+        // resolves to: heading paragraphs often carry multiple stale _Toc*
+        // bookmarks from older TOC regens, and extractBookmarks() keeps the
+        // first-seen one — which may not be the one the current TOC field
+        // actually links to. Override textToAnchor with the TOC's anchor.
         foreach ($this->tocEntries as $e) {
-            if (!empty($e['number']) && !empty($e['text'])) {
-                if (!isset($this->headingNumbers[$e['text']])) {
-                    $this->headingNumbers[$e['text']] = $e['number'];
-                }
-                if (!empty($e['anchor']) && !isset($this->bookmarkText[$e['anchor']])) {
-                    // also seed bookmarkText if a heading was missed by extractBookmarks
+            if (empty($e['text'])) continue;
+            if (!empty($e['number']) && !isset($this->headingNumbers[$e['text']])) {
+                $this->headingNumbers[$e['text']] = $e['number'];
+            }
+            if (!empty($e['anchor'])) {
+                $this->textToAnchor[$e['text']] = $e['anchor'];
+                $this->textToAnchors[$e['text']][] = $e['anchor'];
+                if (!isset($this->bookmarkText[$e['anchor']])) {
                     $this->bookmarkText[$e['anchor']] = $e['text'];
-                    $this->textToAnchor[$e['text']] = $e['anchor'];
                 }
             }
         }
+    }
+
+    /**
+     * Pop the next anchor for a heading text. Used by the converter to walk
+     * TOC entries in document order — when a heading text appears N times,
+     * the Nth converted heading resolves to the Nth TOC anchor.
+     */
+    public function consumeAnchor(string $text): ?string
+    {
+        if (!isset($this->textToAnchors[$text]) || empty($this->textToAnchors[$text])) {
+            return $this->textToAnchor[$text] ?? null;
+        }
+        return array_shift($this->textToAnchors[$text]);
     }
 
     private function splitParagraphs(): void
@@ -393,6 +439,88 @@ class RawXmlIndex
             $prev = $line['text'];
         }
         return $deduped;
+    }
+
+    /**
+     * Find the first DrawingML picture (`<a:blip r:embed="rIdN"/>`) in a
+     * header part, resolve the rId via the part's sibling .rels file, read
+     * the media file out of the docx zip, and return a TipTap image-node
+     * shape (`src` data URL plus optional pixel `width`/`height`). Returns
+     * null when the header has no embedded picture — in this test doc the
+     * "logo box" is a DrawingML rounded rectangle with no `<a:blip>`, so
+     * this correctly falls through to the text placeholder.
+     *
+     * @return array{src:string,width:?int,height:?int}|null
+     */
+    private function extractHeaderLogo(\ZipArchive $zip, string $headerName, string $headerXml): ?array
+    {
+        if (!preg_match('#<a:blip\b[^>]*\br:embed="([^"]+)"#', $headerXml, $bm)) {
+            return null;
+        }
+        $rId = $bm[1];
+
+        // Header part name is e.g. "word/header2.xml"; sibling rels is "word/_rels/header2.xml.rels".
+        $relsName = preg_replace('#^(.*/)([^/]+)$#', '$1_rels/$2.rels', $headerName);
+        if ($relsName === null || $zip->locateName($relsName) === false) return null;
+        $relsXml = (string) $zip->getFromName($relsName);
+        if ($relsXml === '') return null;
+
+        $target = null;
+        if (preg_match_all('#<Relationship\b[^>]*?Id="([^"]+)"[^>]*?Target="([^"]+)"#', $relsXml, $rm, PREG_SET_ORDER)) {
+            foreach ($rm as $r) {
+                if ($r[1] === $rId) { $target = $r[2]; break; }
+            }
+        }
+        if ($target === null) return null;
+
+        // `Target` is relative to the part's directory (word/). It usually looks
+        // like "media/image1.png"; resolve to "word/media/image1.png".
+        $base = preg_replace('#/[^/]*$#', '/', $headerName);
+        $mediaName = $this->normalisePath(($base ?? '') . $target);
+        if ($zip->locateName($mediaName) === false) return null;
+        $bytes = (string) $zip->getFromName($mediaName);
+        if ($bytes === '') return null;
+
+        $mime = $this->guessMimeFromName($mediaName);
+        $src = 'data:' . $mime . ';base64,' . base64_encode($bytes);
+
+        // Pull pixel dimensions from <wp:extent cx="..." cy="..."/>. EMU units;
+        // 914400 EMU = 1 inch = 96 px → 9525 EMU per px.
+        $width = $height = null;
+        if (preg_match('#<wp:extent\s+cx="(\d+)"\s+cy="(\d+)"#', $headerXml, $em)) {
+            $width = (int) round(((int) $em[1]) / 9525);
+            $height = (int) round(((int) $em[2]) / 9525);
+            if ($width <= 0) $width = null;
+            if ($height <= 0) $height = null;
+        }
+
+        return ['src' => $src, 'width' => $width, 'height' => $height];
+    }
+
+    /** Resolve "../foo/bar" / "./baz" segments in a zip-relative path. */
+    private function normalisePath(string $path): string
+    {
+        $parts = [];
+        foreach (explode('/', $path) as $seg) {
+            if ($seg === '' || $seg === '.') continue;
+            if ($seg === '..') { array_pop($parts); continue; }
+            $parts[] = $seg;
+        }
+        return implode('/', $parts);
+    }
+
+    /** Map a media file's extension to a MIME type, defaulting to image/png. */
+    private function guessMimeFromName(string $name): string
+    {
+        $ext = strtolower((string) pathinfo($name, PATHINFO_EXTENSION));
+        return match ($ext) {
+            'jpg', 'jpeg' => 'image/jpeg',
+            'gif' => 'image/gif',
+            'svg' => 'image/svg+xml',
+            'webp' => 'image/webp',
+            'bmp' => 'image/bmp',
+            default => 'image/png',
+        };
     }
 
     /**

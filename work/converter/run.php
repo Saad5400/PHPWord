@@ -9,6 +9,9 @@ $out = $argv[2] ?? __DIR__ . '/../output/v2.json';
 $start = microtime(true);
 $conv = new \PhpWord\TipTap\TipTapConverter();
 $doc = $conv->convertFile($src);
+if ($conv->arabicIndicNumerals) {
+    $doc = \PhpWord\TipTap\TipTapConverter::applyArabicIndicNumerals($doc);
+}
 $elapsed = microtime(true) - $start;
 
 file_put_contents($out, json_encode($doc, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT));
