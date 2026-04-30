@@ -1,0 +1,17 @@
+{
+  "_comment": "Anchor manifest for QA per-page captures. Each entry maps a reference page number (matching work/reference-pages/page-NN.png) to a strategy for finding the matching content in the rendered sandbox. Strategies, in order: 'y' (fixed scroll-y), 'text' (substring match — prefers headings, falls back to any text node), 'tag' + 'tag_index' (nth element of given tag), 'fallback_y' (last-resort scroll-y if all named strategies miss). 'text_in' optional override: 'any' = match any text node; 'h1'/'h2'/etc = restrict to that heading level. Add/edit entries here without touching capture.sh.",
+  "viewport": { "width": 900, "height": 1200 },
+  "anchors": [
+    { "page":  1, "label": "cover",                         "y": 0 },
+    { "page":  2, "label": "TOC start (الفهرس)",            "text": "الفهرس",                              "fallback_y": 75 },
+    { "page":  3, "label": "TOC continued",                  "text": "تعارض المصالح",                       "fallback_y": 7193 },
+    { "page":  5, "label": "TOC continued — قياس الأعمال",  "text": "قياس الأعمال",                        "fallback_y": 19823 },
+    { "page":  8, "label": "Usage guide (دليل الاستخدام)",   "text": "دليل الاستخدام",                      "fallback_y": 212 },
+    { "page":  9, "label": "Body intro (وثيقة العقد)",       "text": "وثيقة العقد الأساسية",                "fallback_y": 660 },
+    { "page": 10, "label": "Contract docs list",             "text": "وثائق العقد",      "text_in": "h3",  "fallback_y": 1500 },
+    { "page": 11, "label": "Body — purpose/value",           "text": "قيمة العقد",       "text_in": "h3",  "fallback_y": 2300 },
+    { "page": 12, "label": "Section banner — شروط العقد",    "text": "شروط العقد",       "text_in": "h1",  "fallback_y": 3400 },
+    { "page": 14, "label": "Definitions table top",          "text": "عريفات",           "text_in": "h3",  "fallback_y": 3490 },
+    { "page": 16, "label": "Records section",                "text": "السجلات",                              "fallback_y": 6900 }
+  ]
+}

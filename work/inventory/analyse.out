@@ -1,0 +1,179 @@
+## PHPWord element counts
+  Text                 1967
+  TextRun              397
+  ListItemRun          338
+  TextBreak            40
+  Table                9
+  PageBreak            3
+  Title                1
+
+## Title depths (PHPWord Title element only — most headings come through as ListItemRun with Heading style)
+  depth=3  1
+
+## Paragraph styles seen on TextRun
+  getStyleName=BodyText getAlignment=both                                376
+  getStyleName=Heading3 getAlignment=both                                111
+  getAlignment=both                                                      86
+  getStyleName=ListParagraph getAlignment=both                           49
+  getStyleName=BodyText getAlignment=center                              35
+  (empty)                                                                18
+  getAlignment=center                                                    13
+  getStyleName=NormalWeb getAlignment=center                             13
+  getStyleName=Heading1 getAlignment=both                                11
+  getStyleName=BodyText getAlignment=lowKashida                          7
+  getStyleName=BodyText                                                  4
+  getStyleName=Heading1 getAlignment=center                              3
+  getStyleName=BlockText getAlignment=both                               3
+  getStyleName=Heading1                                                  2
+  getStyleName=ListParagraph getAlignment=center                         2
+  getAlignment=lowKashida                                                1
+  getStyleName=CommentText getAlignment=right                            1
+
+## Paragraph styles seen on ListItemRun
+  getStyleName=BodyText getAlignment=both                                153
+  getStyleName=Heading3 getAlignment=both                                111
+  getStyleName=ListParagraph getAlignment=both                           49
+  getStyleName=Heading1 getAlignment=both                                11
+  getStyleName=BodyText getAlignment=lowKashida                          6
+  getStyleName=Heading1 getAlignment=center                              3
+  getStyleName=BlockText getAlignment=both                               3
+  getStyleName=Heading1                                                  2
+
+## ListItemRun depths
+  depth=0  323
+  depth=1  10
+  depth=2  5
+
+## numbering refs used (top 20)
+  PHPWordList48 (numId=48)                           68
+  PHPWordList23 (numId=23)                           19
+  PHPWordList0 (numId=)                              16
+  PHPWordList25 (numId=25)                           13
+  PHPWordList61 (numId=61)                           11
+  PHPWordList57 (numId=57)                           10
+  PHPWordList18 (numId=18)                           9
+  PHPWordList19 (numId=19)                           9
+  PHPWordList56 (numId=56)                           8
+  PHPWordList50 (numId=50)                           8
+  PHPWordList52 (numId=52)                           8
+  PHPWordList20 (numId=20)                           6
+  PHPWordList51 (numId=51)                           6
+  PHPWordList76 (numId=76)                           6
+  PHPWordList60 (numId=60)                           6
+  PHPWordList59 (numId=59)                           5
+  PHPWordList63 (numId=63)                           5
+  PHPWordList22 (numId=22)                           5
+  PHPWordList34 (numId=34)                           5
+  PHPWordList26 (numId=26)                           5
+
+## Tables (9): rows×cells (cells>cols when merges exist)
+  Table 1: 4x8          gridSpan-merges=0
+  Table 2: 22x44        gridSpan-merges=0
+  Table 3: 7x24         gridSpan-merges=9
+  Table 4: 6x24         gridSpan-merges=0
+  Table 5: 7x14         gridSpan-merges=0
+  Table 6: 2x8          gridSpan-merges=0
+  Table 7: 2x8          gridSpan-merges=0
+  Table 8: 2x2          gridSpan-merges=0
+  Table 9: 2x2          gridSpan-merges=0
+
+## Hyperlinks via PHPWord Link element
+  internal: 0  external: 0
+  samples internal: 
+  samples external: 
+
+## Run colors (top 10)
+  #000000   597
+  #FF0000   252
+  #0070C0   174
+  #00B050   107
+  #FFFFFF   14
+  #575555   1
+
+## Raw document.xml feature counts
+  paragraphs                               902
+  tables                                   9
+  rows                                     54
+  cells                                    134
+  gridSpan (col-merge)                     9
+  vMerge (row-merge)                       0
+  hyperlinks                               127
+  bookmarks                                571
+  page-break runs (br type=page)           3
+  page-break-before (pPr)                  0
+  paragraph borders pBdr                   110
+  shading shd                              245
+  tabs definitions                         124
+  tab characters in runs                   249
+  highlight                                1
+  indentation                              147
+  numId references                         338
+  ilvl references                          338
+  rtl runs                                 3238
+  bidi paragraphs                          782
+  sectPr (sections)                        1
+  headerReference                          3
+  footerReference                          2
+  sdt (content control)                    7
+  fldSimple (simple field)                 0
+  fldChar (complex field)                  384
+  instrText (field code)                   128
+  footnoteReference                        0
+  endnoteReference                         0
+  commentReference                         0
+  tracked-change ins                       0
+  tracked-change del                       0
+  drawings (DrawingML)                     0
+  pict (legacy VML)                        0
+  OLE objects                              0
+  AlternateContent                         0
+  mathML m:oMath                           0
+  caps (uppercase)                         16
+  smallCaps                                0
+  strike                                   2
+  dstrike (double-strike)                  0
+  underline u                              181
+  vertAlign (sup/sub)                      0
+  rStyle (char style)                      755
+  pStyle (para style)                      761
+  bidiVisual (RTL table)                   9
+  titlePg (different first-page header)    1
+
+## Distinct pStyle values (in document.xml)
+  BodyText                  437
+  Heading3                  112
+  TOC3                      111
+  ListParagraph             51
+  TOC1                      16
+  Heading1                  16
+  NormalWeb                 13
+  BlockText                 3
+  TOCHeading                1
+  CommentText               1
+
+## Distinct rStyle values
+  Hyperlink                 752
+  CommentReference          2
+  BodyTextChar              1
+
+## Distinct jc (justification) values
+  both                      645
+  center                    99
+  right                     24
+  lowKashida                8
+
+## Distinct field instructions
+  PAGEREF # \h                                       127
+  TOC \o "#-#" \h \z \u                              1
+
+## Header / footer parts present
+  word/footnotes.xml          2123 B  texts=0 drawings=0 tables=0
+  word/endnotes.xml           2115 B  texts=0 drawings=0 tables=0
+  word/header1.xml           15348 B  texts=4 drawings=2 tables=0
+  word/header2.xml           11816 B  texts=5 drawings=1 tables=0
+  word/footer1.xml            8424 B  texts=7 drawings=0 tables=1
+  word/header3.xml           11529 B  texts=5 drawings=1 tables=0
+  word/footer2.xml            8254 B  texts=8 drawings=0 tables=1
+
+## Embedded fonts (word/fonts/*.odttf)
+  count: 26 (these are obfuscated embedded subsets, not relevant for converter content but explain why styles request specific font names)

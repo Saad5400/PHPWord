@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>TipTap Sandbox</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@300;400;500;700;800&family=Cairo:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --page-width: 794px;
+    --page-pad: 56px;
+  }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #eee;
+    font-family: 'Tajawal', sans-serif;
+    color: #111;
+  }
+  body {
+    padding: 24px 0 80px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  #status {
+    width: var(--page-width);
+    max-width: 100%;
+    box-sizing: border-box;
+    padding: 8px 12px;
+    margin-bottom: 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: #fff8c5;
+    border: 1px solid #d4c875;
+    color: #5a4500;
+  }
+  #status.ok { background: #e6ffed; border-color: #a8e0bb; color: #14532d; }
+  #status.error { background: #ffe4e4; border-color: #f0a0a0; color: #7a1a1a; white-space: pre-wrap; }
+  #page {
+    width: var(--page-width);
+    max-width: 100%;
+    box-sizing: border-box;
+    background: #fff;
+    border: 1px solid #bbb;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    padding: var(--page-pad);
+    min-height: 1123px; /* a4 height at 96dpi */
+    line-height: 1.55;
+    font-size: 16px;
+  }
+  #page h1 { font-size: 2em; margin: 0.6em 0 0.4em; line-height: 1.25; }
+  #page h2 { font-size: 1.5em; margin: 0.6em 0 0.4em; line-height: 1.3; }
+  #page h3 { font-size: 1.25em; margin: 0.6em 0 0.4em; line-height: 1.3; }
+  #page h4 { font-size: 1.1em; margin: 0.6em 0 0.4em; line-height: 1.3; }
+  #page h5 { font-size: 1em; margin: 0.6em 0 0.4em; line-height: 1.3; font-weight: 700; }
+  #page h6 { font-size: 0.9em; margin: 0.6em 0 0.4em; line-height: 1.3; font-weight: 700; }
+  #page p { margin: 0.4em 0; }
+  #page ul, #page ol { padding-inline-start: 2em; margin: 0.4em 0; }
+  #page li { margin: 0.15em 0; }
+  #page li > p { margin: 0; }
+  #page blockquote {
+    border-inline-start: 3px solid #ccc;
+    padding-inline-start: 12px;
+    color: #444;
+    margin: 0.6em 0;
+  }
+  #page code {
+    background: #f2f2f2;
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.92em;
+  }
+  #page pre {
+    background: #f7f7f7;
+    padding: 10px;
+    border-radius: 4px;
+    overflow: auto;
+  }
+  #page pre code { background: transparent; padding: 0; }
+  #page hr {
+    border: none;
+    border-top: 1px solid #ccc;
+    margin: 1em 0;
+  }
+  #page img { max-width: 100%; height: auto; }
+  #page table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 0.6em 0;
+    table-layout: fixed;
+  }
+  #page table td, #page table th {
+    border: 1px solid #999;
+    padding: 6px 8px;
+    vertical-align: top;
+    word-wrap: break-word;
+  }
+  #page table th { background: #f4f4f4; font-weight: 700; }
+  #page a { color: #0b5ed7; text-decoration: underline; }
+  /* TextAlign extension renders as style="text-align:..." which works either way */
+  #page[dir="rtl"] { font-family: 'Tajawal', 'Cairo', sans-serif; }
+</style>
+</head>
+<body>
+<div id="status">loading…</div>
+<div id="page" lang="auto"><em style="color:#999">rendering…</em></div>
+
+<script type="module">
+  const statusEl = document.getElementById('status');
+  const pageEl = document.getElementById('page');
+
+  function setStatus(kind, msg) {
+    statusEl.className = kind;
+    statusEl.textContent = msg;
+  }
+  function fail(err) {
+    const msg = (err && err.stack) ? err.stack : String(err);
+    setStatus('error', 'ERROR: ' + msg);
+    pageEl.innerHTML = '<pre style="color:#7a1a1a;white-space:pre-wrap">' +
+      msg.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])) +
+      '</pre>';
+    window.__renderStatus = { error: msg };
+    console.error(err);
+  }
+  window.addEventListener('error', e => fail(e.error || e.message));
+  window.addEventListener('unhandledrejection', e => fail(e.reason));
+
+  function containsArabic(text) {
+    if (!text) return false;
+    const sample = text.slice(0, 200);
+    for (let i = 0; i < sample.length; i++) {
+      const c = sample.charCodeAt(i);
+      if (c >= 0x0600 && c <= 0x06FF) return true;
+    }
+    return false;
+  }
+
+  function flattenText(node, out) {
+    if (!node) return;
+    if (typeof node.text === 'string') out.push(node.text);
+    if (Array.isArray(node.content)) {
+      for (const c of node.content) flattenText(c, out);
+    }
+  }
+
+  async function main() {
+    setStatus('loading', 'fetching ./doc.json…');
+    const res = await fetch('./doc.json', { cache: 'no-store' });
+    if (!res.ok) throw new Error(`fetch ./doc.json failed: HTTP ${res.status}`);
+    const doc = await res.json();
+    if (!doc || doc.type !== 'doc') {
+      throw new Error('doc.json must be a TipTap doc with {"type":"doc","content":[...]}');
+    }
+
+    setStatus('loading', 'rendering…');
+
+    // Render the JSON to HTML directly. We don't use @tiptap/html's
+    // generateHTML because its sanitizer strips inline `style` attributes
+    // from mark renderHTML output — losing every `color`, `font-size`, etc.
+    // declaration. Our own walker is straightforward, ~50 lines, and gives
+    // full control over how attrs serialize. The TipTap extension array
+    // above remains useful for documenting the schema; the renderer below
+    // is what actually produces the DOM.
+    let html;
+    try {
+      html = renderDocToHtml(doc);
+    } catch (e) {
+      throw new Error('renderDocToHtml failed: ' + (e && e.message ? e.message : e));
+    }
+
+    pageEl.innerHTML = html;
+
+    // RTL detection
+    const textBuf = [];
+    flattenText(doc, textBuf);
+    const joined = textBuf.join(' ');
+    if (containsArabic(joined)) {
+      pageEl.setAttribute('dir', 'rtl');
+    } else {
+      pageEl.setAttribute('dir', 'ltr');
+    }
+
+    setStatus('ok', 'rendered ok — ' + (doc.content ? doc.content.length : 0) + ' top-level nodes');
+    window.__renderStatus = 'ok';
+  }
+
+  // ---------- Custom JSON-to-HTML renderer ----------
+  // Replaces @tiptap/html's generateHTML, which strips inline `style` from
+  // mark renderHTML output. We walk the TipTap doc JSON ourselves, emitting
+  // strings for blocks/inlines and keeping every styling attribute intact.
+
+  const MARK_RENDERERS = {
+    bold:        () => ({ tag: 'strong' }),
+    italic:      () => ({ tag: 'em' }),
+    underline:   () => ({ tag: 'u' }),
+    strike:      () => ({ tag: 's' }),
+    superscript: () => ({ tag: 'sup' }),
+    subscript:   () => ({ tag: 'sub' }),
+    code:        () => ({ tag: 'code' }),
+    link: (m) => {
+      const a = m.attrs || {};
+      return {
+        tag: 'a',
+        attrs: {
+          href: a.href || '#',
+          target: a.target || '_blank',
+          rel: a.rel || 'noopener noreferrer',
+        },
+      };
+    },
+    textStyle: (m) => {
+      const a = m.attrs || {};
+      const decls = [];
+      if (a.color)           decls.push(`color: ${a.color}`);
+      if (a.fontSize)        decls.push(`font-size: ${a.fontSize}`);
+      if (a.fontFamily)      decls.push(`font-family: ${a.fontFamily}`);
+      if (a.backgroundColor) decls.push(`background-color: ${a.backgroundColor}`);
+      if (a.lineHeight)      decls.push(`line-height: ${a.lineHeight}`);
+      if (decls.length === 0) return null; // skip empty wrappers
+      return { tag: 'span', attrs: { style: decls.join('; ') } };
+    },
+  };
+
+  // Stable mark-application order: textStyle innermost, then formatting,
+  // then link outermost. This matches TipTap's typical render priority and
+  // ensures `<a><strong><span style=...>text</span></strong></a>`.
+  const MARK_ORDER = ['textStyle', 'subscript', 'superscript', 'code', 'strike', 'underline', 'italic', 'bold', 'link'];
+
+  function renderMarks(text, marks) {
+    if (!marks || !marks.length) return escapeHtml(text);
+    const sortedMarks = [...marks].sort((a, b) => {
+      const ai = MARK_ORDER.indexOf(a.type);
+      const bi = MARK_ORDER.indexOf(b.type);
+      return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+    });
+    let html = escapeHtml(text);
+    for (const m of sortedMarks) {
+      const renderer = MARK_RENDERERS[m.type];
+      if (!renderer) continue;
+      const spec = renderer(m);
+      if (!spec) continue;
+      html = openTag(spec.tag, spec.attrs) + html + `</${spec.tag}>`;
+    }
+    return html;
+  }
+
+  function styleFromBlockAttrs(node) {
+    const a = node.attrs || {};
+    const decls = [];
+    if (a.textAlign) decls.push(`text-align: ${a.textAlign}`);
+    if (a.indent != null && a.indent !== '') {
+      const v = typeof a.indent === 'number' ? `${a.indent}px` : String(a.indent);
+      decls.push(`padding-inline-start: ${v}`);
+    }
+    if (a.backgroundColor) decls.push(`background-color: ${a.backgroundColor}`);
+    return decls.length ? decls.join('; ') : null;
+  }
+
+  function blockAttrs(node, extra = {}) {
+    const a = node.attrs || {};
+    const out = { ...extra };
+    if (a.id) out.id = a.id;
+    if (a.dir) out.dir = a.dir;
+    const style = styleFromBlockAttrs(node);
+    if (style) out.style = style;
+    return out;
+  }
+
+  const NODE_RENDERERS = {
+    doc: (n) => renderChildren(n.content),
+    paragraph: (n) => `<p${attrString(blockAttrs(n))}>${renderChildren(n.content)}</p>`,
+    heading: (n) => {
+      const lvl = Math.min(6, Math.max(1, (n.attrs && n.attrs.level) || 1));
+      return `<h${lvl}${attrString(blockAttrs(n))}>${renderChildren(n.content)}</h${lvl}>`;
+    },
+    bulletList: (n) => `<ul${attrString(blockAttrs(n))}>${renderChildren(n.content)}</ul>`,
+    orderedList: (n) => `<ol${attrString(blockAttrs(n))}>${renderChildren(n.content)}</ol>`,
+    listItem: (n) => `<li${attrString(blockAttrs(n))}>${renderChildren(n.content)}</li>`,
+    blockquote: (n) => `<blockquote${attrString(blockAttrs(n))}>${renderChildren(n.content)}</blockquote>`,
+    codeBlock: (n) => `<pre${attrString(blockAttrs(n))}><code>${renderChildren(n.content)}</code></pre>`,
+    horizontalRule: () => `<hr>`,
+    hardBreak: () => `<br>`,
+    image: (n) => {
+      const a = n.attrs || {};
+      const out = { src: a.src || '' };
+      if (a.alt) out.alt = a.alt;
+      if (a.width) out.width = a.width;
+      if (a.height) out.height = a.height;
+      if (a.title) out.title = a.title;
+      return `<img${attrString(out)}>`;
+    },
+    table: (n) => {
+      const inner = renderChildren(n.content);
+      const has_header = (n.content || []).some(row => (row.content || []).some(c => c.type === 'tableHeader'));
+      // Wrap in a single tbody (the schema doesn't model thead/tbody).
+      return `<table${attrString(blockAttrs(n, { class: 'tiptap-table' }))}><tbody>${inner}</tbody></table>`;
+    },
+    tableRow: (n) => `<tr${attrString(blockAttrs(n))}>${renderChildren(n.content)}</tr>`,
+    tableCell: (n) => renderCell('td', n),
+    tableHeader: (n) => renderCell('th', n),
+    text: (n) => renderMarks(n.text || '', n.marks),
+  };
+
+  function renderCell(tag, n) {
+    const a = n.attrs || {};
+    const attrs = blockAttrs(n);
+    if (a.colspan && a.colspan > 1) attrs.colspan = a.colspan;
+    if (a.rowspan && a.rowspan > 1) attrs.rowspan = a.rowspan;
+    if (Array.isArray(a.colwidth) && a.colwidth.length === 1 && a.colwidth[0]) {
+      const prev = attrs.style ? attrs.style.replace(/;\s*$/, '') : '';
+      attrs.style = (prev ? prev + '; ' : '') + `width: ${a.colwidth[0]}px`;
+    }
+    return `<${tag}${attrString(attrs)}>${renderChildren(n.content)}</${tag}>`;
+  }
+
+  function renderChildren(content) {
+    if (!Array.isArray(content)) return '';
+    let out = '';
+    for (const child of content) {
+      const r = NODE_RENDERERS[child.type];
+      if (!r) {
+        if (Array.isArray(child.content)) out += renderChildren(child.content);
+        continue;
+      }
+      out += r(child);
+    }
+    return out;
+  }
+
+  function renderDocToHtml(doc) {
+    return renderChildren(doc.content);
+  }
+
+  function attrString(attrs) {
+    if (!attrs) return '';
+    const parts = [];
+    for (const [k, v] of Object.entries(attrs)) {
+      if (v == null || v === '') continue;
+      parts.push(`${k}="${escapeAttr(String(v))}"`);
+    }
+    return parts.length ? ' ' + parts.join(' ') : '';
+  }
+
+  function openTag(tag, attrs) {
+    return `<${tag}${attrString(attrs)}>`;
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  }
+
+  function escapeAttr(s) {
+    return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  main().catch(fail);
+</script>
+</body>
+</html>
