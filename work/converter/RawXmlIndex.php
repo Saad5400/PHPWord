@@ -54,6 +54,59 @@ class RawXmlIndex
     /** @var array<string,string> heading text → computed multi-level number ("1.", "1.2.", "2.1.3."). */
     public array $headingNumbers = [];
 
+    /**
+     * @var array<int,array<int,array{numFmt:string,lvlText:string,start:int,left:?int,hanging:?int}>>
+     * Indexed `[numId][ilvl] => level def`. Populated from numbering.xml. Used by
+     * the converter to detect arabicAlpha lists and to surface left/hanging indents
+     * the level definition supplies (which PHPWord doesn't always carry through to
+     * paragraphs that inherit the list's pStyle indent).
+     */
+    public array $numberingDefs = [];
+
+    /**
+     * Arabic-letter sequence used by `arabicAlpha` numFmt. Each entry is the
+     * letter that goes at the start of the Nth list item (1-indexed).
+     *
+     * @var array<int,string>
+     */
+    public array $arabicAlphaMap = [
+        1=>'ا', 2=>'ب', 3=>'ج', 4=>'د', 5=>'ه', 6=>'و', 7=>'ز', 8=>'ح', 9=>'ط', 10=>'ي',
+        11=>'ك', 12=>'ل', 13=>'م', 14=>'ن', 15=>'س', 16=>'ع', 17=>'ف', 18=>'ص', 19=>'ق', 20=>'ر',
+        21=>'ش', 22=>'ت', 23=>'ث', 24=>'خ', 25=>'ذ', 26=>'ض', 27=>'ظ', 28=>'غ',
+    ];
+
+    /**
+     * Per-paragraph right indent (twips) keyed by `<w:p>` index. PHPWord drops
+     * `<w:ind w:right>` for ~140 paragraphs in the test doc; this map preserves
+     * them so the converter can emit `marginRight` when the paragraph style
+     * didn't surface one.
+     *
+     * @var array<int,int>
+     */
+    public array $paragraphRightIndent = [];
+
+    /** Per-paragraph left indent (twips) keyed by `<w:p>` index.
+     * @var array<int,int>
+     */
+    public array $paragraphLeftIndent = [];
+
+    /** Per-paragraph hanging indent (twips) keyed by `<w:p>` index. Only set when
+     *  the paragraph carries `<w:ind w:hanging>`.
+     * @var array<int,int>
+     */
+    public array $paragraphHangingIndent = [];
+
+    /**
+     * Map from signature (joined paragraph text, normalised) to a queue of
+     * `['right'=>?int,'left'=>?int,'hanging'=>?int]` entries in document order.
+     * The converter consumes one entry per matching paragraph it emits, which
+     * survives PHPWord drop/group anomalies better than a raw paragraph-index
+     * lookup.
+     *
+     * @var array<string,list<array{right:?int,left:?int,hanging:?int}>>
+     */
+    public array $paragraphIndentBySig = [];
+
     /** @var array<string,string> joined-paragraph-signature → trailing SDT placeholder text. */
     public array $sdtPlaceholders = [];
 
@@ -140,6 +193,73 @@ class RawXmlIndex
         if ($this->numberingXmlCached !== '') {
             $this->buildHeadingNumbersFromNumbering($this->numberingXmlCached);
         }
+        $this->buildParagraphIndents();
+    }
+
+    /**
+     * Walk every `<w:p>` and capture `<w:ind w:left>`, `<w:ind w:right>`, and
+     * `<w:ind w:hanging>` so the converter can fall back when PHPWord drops the
+     * `w:right` attribute for paragraphs that inherit indent from a pStyle.
+     * Also indexes by signature so paragraphs that PHPWord splits/merges across
+     * elements can still be matched.
+     */
+    public function buildParagraphIndents(): void
+    {
+        foreach ($this->paragraphs as $idx => $p) {
+            $body = $p['xml'];
+            // The `<w:ind ...>` we care about is the inline one inside <w:pPr>;
+            // there may also be one inside numbering levels — we want the pPr-local.
+            if (!preg_match('#<w:pPr\b[^>]*>(.*?)</w:pPr>#s', $body, $pm)) continue;
+            $pPr = $pm[1];
+            if (!preg_match('#<w:ind\b([^/>]*)/?>#', $pPr, $im)) continue;
+            $attrs = $im[1];
+            $right = $left = $hanging = null;
+            if (preg_match('#\bw:right="(-?\d+)"#', $attrs, $rm)) $right = (int) $rm[1];
+            if (preg_match('#\bw:end="(-?\d+)"#', $attrs, $rm)) $right = (int) $rm[1];
+            if (preg_match('#\bw:left="(-?\d+)"#', $attrs, $lm)) $left = (int) $lm[1];
+            if (preg_match('#\bw:start="(-?\d+)"#', $attrs, $lm)) $left = (int) $lm[1];
+            if (preg_match('#\bw:hanging="(-?\d+)"#', $attrs, $hm)) $hanging = (int) $hm[1];
+            if ($right === null && $left === null && $hanging === null) continue;
+            if ($right !== null) $this->paragraphRightIndent[$idx] = $right;
+            if ($left !== null) $this->paragraphLeftIndent[$idx] = $left;
+            if ($hanging !== null) $this->paragraphHangingIndent[$idx] = $hanging;
+            $sig = $this->signature($this->extractAllText($body));
+            if ($sig === '') continue;
+            $this->paragraphIndentBySig[$sig][] = [
+                'right' => $right,
+                'left' => $left,
+                'hanging' => $hanging,
+            ];
+        }
+    }
+
+    /**
+     * Pop the next indent entry for a paragraph signature. The converter
+     * walks paragraphs in document order, so the Nth call for a given sig
+     * resolves to the Nth `<w:p>` with that text.
+     *
+     * @return array{right:?int,left:?int,hanging:?int}|null
+     */
+    public function consumeParagraphIndent(string $sig): ?array
+    {
+        if (!isset($this->paragraphIndentBySig[$sig]) || empty($this->paragraphIndentBySig[$sig])) {
+            return null;
+        }
+        return array_shift($this->paragraphIndentBySig[$sig]);
+    }
+
+    /**
+     * Look up numbering level definition (numFmt, lvlText, indent) for a given
+     * numId+ilvl. Returns null when the numId is unknown or the level doesn't
+     * exist. Used by the converter to decide whether to render a list as
+     * arabicAlpha (Arabic letters as markers) or to surface a hanging indent
+     * the level definition carried.
+     *
+     * @return array{numFmt:string,lvlText:string,start:int,left:?int,hanging:?int}|null
+     */
+    public function getNumberingLevel(int $numId, int $ilvl): ?array
+    {
+        return $this->numberingDefs[$numId][$ilvl] ?? null;
     }
 
     /**
@@ -684,7 +804,19 @@ class RawXmlIndex
                         if (preg_match('#<w:numFmt w:val="([^"]+)"#', $lbody, $fm)) $fmt = $fm[1];
                         $lvlText = '';
                         if (preg_match('#<w:lvlText w:val="([^"]*)"#', $lbody, $lt)) $lvlText = $lt[1];
-                        $abstractLevels[$aid][$lvl] = ['fmt' => $fmt, 'lvlText' => $lvlText, 'start' => $start];
+                        $left = null;
+                        $hanging = null;
+                        if (preg_match('#<w:ind\b([^/>]*)/?>#', $lbody, $im)) {
+                            if (preg_match('#\bw:left="(-?\d+)"#', $im[1], $lim)) $left = (int) $lim[1];
+                            if (preg_match('#\bw:hanging="(-?\d+)"#', $im[1], $him)) $hanging = (int) $him[1];
+                        }
+                        $abstractLevels[$aid][$lvl] = [
+                            'fmt' => $fmt,
+                            'lvlText' => $lvlText,
+                            'start' => $start,
+                            'left' => $left,
+                            'hanging' => $hanging,
+                        ];
                     }
                 }
             }
@@ -697,6 +829,19 @@ class RawXmlIndex
                 if (preg_match('#<w:abstractNumId w:val="(\d+)"#', $n[2], $am2)) {
                     $numToAbstract[$numId] = (int) $am2[1];
                 }
+            }
+        }
+        // Populate the public numberingDefs map keyed by numId.
+        foreach ($numToAbstract as $numId => $aid) {
+            if (!isset($abstractLevels[$aid])) continue;
+            foreach ($abstractLevels[$aid] as $lvl => $def) {
+                $this->numberingDefs[$numId][$lvl] = [
+                    'numFmt' => $def['fmt'],
+                    'lvlText' => $def['lvlText'],
+                    'start' => $def['start'],
+                    'left' => $def['left'],
+                    'hanging' => $def['hanging'],
+                ];
             }
         }
 

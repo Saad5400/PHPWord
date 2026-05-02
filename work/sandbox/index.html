@@ -273,6 +273,12 @@
     text-align: right;
   }
 
+  /* When the converter has already baked the marker (e.g. an Arabic letter)
+     into the listItem text content, suppress the default browser marker so
+     it isn't doubled up.  The list still flows as a list semantically. */
+  #page ol[data-marker="none"] { list-style: none; padding-inline-end: 0; padding-inline-start: 0; margin: 0; }
+  #page ol[data-marker="none"] li { list-style: none; }
+
   /* Section-divider spacing — when a page-break is immediately followed by a
      top-level heading, give the heading extra breathing room so it visually
      starts a new section. */
@@ -633,8 +639,25 @@
       return `<h${lvl}${attrString(ctx._blockAttrs(n))}>${ctx._renderChildren(n.content)}</h${lvl}>`;
     },
     bulletList:  (n, ctx) => `<ul${attrString(ctx._blockAttrs(n))}>${ctx._renderChildren(n.content)}</ul>`,
-    orderedList: (n, ctx) => `<ol${attrString(ctx._blockAttrs(n))}>${ctx._renderChildren(n.content)}</ol>`,
-    listItem:    (n, ctx) => `<li${attrString(ctx._blockAttrs(n))}>${ctx._renderChildren(n.content)}</li>`,
+    orderedList: (n, ctx) => {
+      const extra = {};
+      if (n.attrs && n.attrs.markerStyle === 'none') extra['data-marker'] = 'none';
+      return `<ol${attrString(ctx._blockAttrs(n, extra))}>${ctx._renderChildren(n.content)}</ol>`;
+    },
+    listItem: (n, ctx) => {
+      const attrs = ctx._blockAttrs(n);
+      const a = n.attrs || {};
+      // listItem hanging indent: when marginLeft + (negative) textIndent are
+      // both present, the styleFromBlockAttrs path emits margin-inline-start
+      // but not text-indent.  Append text-indent here so the first line of
+      // each item hangs back to the marker column.
+      if (a.textIndent != null && a.textIndent !== '') {
+        const v = typeof a.textIndent === 'number' ? `${a.textIndent}px` : String(a.textIndent);
+        const prev = attrs.style ? attrs.style.replace(/;\s*$/, '') : '';
+        attrs.style = (prev ? prev + '; ' : '') + `text-indent: ${v}`;
+      }
+      return `<li${attrString(attrs)}>${ctx._renderChildren(n.content)}</li>`;
+    },
     blockquote:  (n, ctx) => `<blockquote${attrString(ctx._blockAttrs(n))}>${ctx._renderChildren(n.content)}</blockquote>`,
     codeBlock:   (n, ctx) => `<pre${attrString(ctx._blockAttrs(n))}><code>${ctx._renderChildren(n.content)}</code></pre>`,
     horizontalRule: () => `<hr>`,

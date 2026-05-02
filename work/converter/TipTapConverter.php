@@ -528,7 +528,7 @@ class TipTapConverter
             $content = $this->maybePatchSdt($content);
             return [
                 'type' => $this->nodeType('paragraph'),
-                'attrs' => $this->paragraphAttrs($el->getParagraphStyle()),
+                'attrs' => $this->paragraphAttrs($el->getParagraphStyle(), $this->elementSignature($el)),
                 'content' => $content,
             ];
         }
@@ -569,7 +569,7 @@ class TipTapConverter
     private function buildHeadingNode(int $level, array $content, $pStyle): array
     {
         $headingText = $this->joinText($content);
-        $paraAttrs = $this->paragraphAttrs($pStyle);
+        $paraAttrs = $this->paragraphAttrs($pStyle, $this->normaliseSig($headingText));
         // Headings get their line-height from the heading CSS, not the body default.
         $hasExplicitLh = $this->paragraphLineHeight($pStyle) !== null;
         if (!$hasExplicitLh) unset($paraAttrs['lineHeight']);
@@ -913,11 +913,29 @@ class TipTapConverter
 
         $rootDepth = 0;
         $rootNode = ['type' => $topType, 'content' => []];
+        $rootAttrs = [];
         if ($this->config->defaultRtl || $this->paragraphDir($firstTopItem->getParagraphStyle()) === 'rtl') {
-            $rootNode['attrs'] = ['dir' => 'rtl'];
+            $rootAttrs['dir'] = 'rtl';
         }
-        // Stack of open lists at each depth (index = depth). Each entry is [&listNode, &lastItem]
-        $stack = [['list' => &$rootNode, 'lastItemContent' => null]];
+        // Top-level Arabic-alpha lists need their default marker suppressed
+        // so the baked-in "ا. ", "ب. " prefix isn't doubled by the browser's
+        // decimal counter. arabicAbjad — despite the abjad name — is treated
+        // by the source as a numeric list (rendered as ١./٢./٣. via the
+        // Arabic-Indic post-process pass), so it stays on the default
+        // ordered-list path.
+        $topFmt = $this->listLevelNumFmt($firstTopItem, 0);
+        if ($topFmt === 'arabicAlpha') {
+            $rootAttrs['markerStyle'] = 'none';
+        }
+        if (!empty($rootAttrs)) $rootNode['attrs'] = $rootAttrs;
+        // Stack of open lists at each depth. Each entry tracks the live list
+        // node, the abjad/alpha counter (incremented per item at that depth
+        // when the list is letter-marked), and the numFmt.
+        $stack = [[
+            'list' => &$rootNode,
+            'fmt' => $topFmt,
+            'counter' => 0,
+        ]];
 
         foreach ($items as $item) {
             $depth = (int) $item->getDepth();
@@ -940,19 +958,59 @@ class TipTapConverter
                 }
                 $lastIdx = count($parent['content']) - 1;
                 $childType = $this->listTypeFor($item, $depth);
+                $childFmt = $this->listLevelNumFmt($item, $depth);
                 $newList = ['type' => $childType, 'content' => []];
-                if ($this->config->defaultRtl) $newList['attrs'] = ['dir' => 'rtl'];
+                $newAttrs = [];
+                if ($this->config->defaultRtl) $newAttrs['dir'] = 'rtl';
+                if ($childFmt === 'arabicAlpha') {
+                    $newAttrs['markerStyle'] = 'none';
+                }
+                if (!empty($newAttrs)) $newList['attrs'] = $newAttrs;
                 $parent['content'][$lastIdx]['content'][] = &$newList;
-                $stack[] = ['list' => &$newList];
+                $stack[] = [
+                    'list' => &$newList,
+                    'fmt' => $childFmt,
+                    'counter' => 0,
+                ];
                 unset($newList);
             }
 
-            // Build the listItem
+            // Build the inline content for the listItem's paragraph. When the
+            // list level uses an Arabic letter format, prepend the next
+            // letter as a text node — the marker is baked in because
+            // browsers don't render `arabic-indic` letters from `list-style`.
+            $inline = $this->convertInlineRun($item);
+            $levelFmt = $stack[$depth]['fmt'] ?? null;
+            if ($levelFmt === 'arabicAlpha') {
+                $stack[$depth]['counter']++;
+                $letter = $this->arabicAbjadLetter($stack[$depth]['counter']);
+                if ($letter !== '') {
+                    // Inherit marks from the first text node so the prefix
+                    // matches the body's font/color.
+                    $marks = null;
+                    foreach ($inline as $c) {
+                        if (($c['type'] ?? null) === 'text') {
+                            $marks = $c['marks'] ?? null;
+                            break;
+                        }
+                    }
+                    $prefix = ['type' => $this->nodeType('text'), 'text' => $letter . '. '];
+                    if ($marks) $prefix['marks'] = $marks;
+                    array_unshift($inline, $prefix);
+                }
+            }
+
+            $itemAttrs = $this->paragraphAttrs($item->getParagraphStyle(), $this->elementSignature($item));
+            // Fall back to the numbering-level definition's `<w:ind>` when the
+            // paragraph itself didn't carry one. The level's `left` is the
+            // start indent; `hanging` is the negative textIndent that pulls
+            // the marker out into the gutter.
+            $itemAttrs = $this->applyNumberingLevelIndent($itemAttrs, $item, $depth);
             $listItemContent = [
                 [
                     'type' => $this->nodeType('paragraph'),
-                    'attrs' => $this->paragraphAttrs($item->getParagraphStyle()),
-                    'content' => $this->convertInlineRun($item),
+                    'attrs' => $itemAttrs,
+                    'content' => $inline,
                 ],
             ];
             $current = &$stack[$depth]['list'];
@@ -964,6 +1022,49 @@ class TipTapConverter
         }
 
         return $rootNode;
+    }
+
+    /**
+     * Look up the OOXML numFmt for a list item's level (e.g. "decimal",
+     * "lowerLetter", "arabicAlpha", "arabicAbjad", "bullet"). Returns null
+     * when the item carries no numbering definition.
+     */
+    private function listLevelNumFmt(ListItemRun $item, int $depth): ?string
+    {
+        $style = $item->getStyle();
+        if (!$style instanceof ListItemStyle) return null;
+        $numbering = null;
+        $numId = method_exists($style, 'getNumId') ? $style->getNumId() : null;
+        if ($numId !== null && isset($this->numberingById[(int) $numId])) {
+            $numbering = $this->numberingById[(int) $numId];
+        }
+        if ($numbering === null) {
+            $numStyle = method_exists($style, 'getNumStyle') ? $style->getNumStyle() : null;
+            if ($numStyle && isset($this->numberingByName[$numStyle])) {
+                $numbering = $this->numberingByName[$numStyle];
+            }
+        }
+        if (!$numbering instanceof Numbering) return null;
+        $levels = $numbering->getLevels();
+        $lvl = $levels[$depth] ?? $levels[0] ?? null;
+        if (!$lvl instanceof NumberingLevel) return null;
+        $fmt = $lvl->getFormat();
+        return is_string($fmt) ? $fmt : null;
+    }
+
+    /**
+     * Render the n-th item of an Arabic-abjad / Arabic-alpha sequence.
+     * Used when the list's numFmt is `arabicAlpha` or `arabicAbjad` and we
+     * need to bake the marker into the listItem text (because browsers
+     * default-render `<ol>` markers as decimal). The map matches Word's
+     * abjad/hijai ordering: ا,ب,ج,د,ه,و,ز,ح,ط,ي,ك,ل,م,ن,س,ع,ف,ص,ق,ر,ش,ت,ث,خ,ذ,ض,ظ,غ.
+     */
+    private function arabicAbjadLetter(int $n): string
+    {
+        static $alphabet = ['ا','ب','ج','د','ه','و','ز','ح','ط','ي','ك','ل','م','ن','س','ع','ف','ص','ق','ر','ش','ت','ث','خ','ذ','ض','ظ','غ'];
+        if ($n <= 0) return '';
+        if ($n <= count($alphabet)) return $alphabet[$n - 1];
+        return (string) $n;
     }
 
     /** Determine bulletList / orderedList for a given list item & its level. */
@@ -1174,8 +1275,14 @@ class TipTapConverter
      * lineHeight, marginTop, marginBottom.
      * `indent` / `marginTop` / `marginBottom` are in CSS pixels
      * (96px = 1in = 1440 twips, 20 twips = 1pt).
+     *
+     * When $rawSig is non-empty, RawXmlIndex's per-paragraph indent map is
+     * consulted as a fallback: if PHPWord didn't surface a marginRight /
+     * marginLeft / textIndent, pull the value out of `<w:ind>` directly.
+     * This catches the ~140 paragraphs whose `w:right` attribute PHPWord
+     * drops because it inherits from a pStyle the reader doesn't carry.
      */
-    private function paragraphAttrs($pStyle): array
+    private function paragraphAttrs($pStyle, string $rawSig = ''): array
     {
         $attrs = [
             'textAlign' => $this->alignment($pStyle),
@@ -1186,6 +1293,29 @@ class TipTapConverter
         [$marginLeft, $marginRight] = $this->paragraphSideMargins($pStyle);
         if ($marginLeft !== null) $attrs['marginLeft'] = $marginLeft;
         if ($marginRight !== null) $attrs['marginRight'] = $marginRight;
+        $hanging = $this->paragraphHangingIndent($pStyle);
+        if ($hanging !== null) $attrs['textIndent'] = $hanging;
+        // Raw-XML fallback for paragraphs whose `<w:ind>` PHPWord didn't
+        // surface (the reader sometimes only carries pStyle-inherited indent
+        // when the run has its own pPr override; the raw value takes priority
+        // for the right/left/hanging slots that ended up null above).
+        if ($rawSig !== '' && $this->rawIndex !== null) {
+            $rawInd = $this->rawIndex->consumeParagraphIndent($rawSig);
+            if ($rawInd !== null) {
+                $isRtl = (($attrs['dir'] ?? null) === 'rtl');
+                if (!isset($attrs['marginRight']) && $rawInd['right'] !== null && $rawInd['right'] > 0) {
+                    $attrs['marginRight'] = $this->twipsToPt($rawInd['right']);
+                }
+                if (!isset($attrs['marginLeft']) && $rawInd['left'] !== null && $rawInd['left'] > 0) {
+                    $attrs['marginLeft'] = $this->twipsToPt($rawInd['left']);
+                }
+                // RTL hanging indent: lvlText sits to the left of the start
+                // edge — emit a negative textIndent so the marker hangs out.
+                if (!isset($attrs['textIndent']) && $rawInd['hanging'] !== null && $rawInd['hanging'] > 0) {
+                    $attrs['textIndent'] = '-' . $this->twipsToPt($rawInd['hanging']);
+                }
+            }
+        }
         $lh = $this->paragraphLineHeight($pStyle);
         if ($lh !== null) $attrs['lineHeight'] = $lh;
         [$mt, $mb] = $this->paragraphMargins($pStyle);
@@ -1202,6 +1332,78 @@ class TipTapConverter
             }
         }
         return $attrs;
+    }
+
+    /** Format twips as a "Xpt" string (20 twips = 1pt), trimmed. */
+    private function twipsToPt(int $twips): string
+    {
+        $pt = $twips / 20.0;
+        return rtrim(rtrim(number_format($pt, 2, '.', ''), '0'), '.') . 'pt';
+    }
+
+    /**
+     * Apply a list level's `<w:ind w:left>` / `<w:ind w:hanging>` to a list
+     * item paragraph's attrs when the paragraph itself didn't surface either.
+     * For RTL list items the start edge is on the right, so `left` becomes
+     * `marginRight`; the hanging value becomes a negative `textIndent` so the
+     * Arabic-letter prefix hangs out into the gutter.
+     */
+    private function applyNumberingLevelIndent(array $attrs, ListItemRun $item, int $depth): array
+    {
+        if ($this->rawIndex === null) return $attrs;
+        $style = $item->getStyle();
+        if (!$style instanceof ListItemStyle) return $attrs;
+        $numId = method_exists($style, 'getNumId') ? $style->getNumId() : null;
+        if ($numId === null) return $attrs;
+        $def = $this->rawIndex->getNumberingLevel((int) $numId, $depth);
+        if ($def === null) return $attrs;
+        $isRtl = (($attrs['dir'] ?? null) === 'rtl');
+        if ($def['left'] !== null && $def['left'] > 0) {
+            $key = $isRtl ? 'marginRight' : 'marginLeft';
+            if (!isset($attrs[$key])) $attrs[$key] = $this->twipsToPt($def['left']);
+        }
+        if ($def['hanging'] !== null && $def['hanging'] > 0) {
+            if (!isset($attrs['textIndent'])) {
+                $attrs['textIndent'] = '-' . $this->twipsToPt($def['hanging']);
+            }
+        }
+        return $attrs;
+    }
+
+    /** Joined-and-normalised text for a single AbstractContainer (TextRun /
+     *  ListItemRun / Title.text). Mirrors RawXmlIndex's signature() — used to
+     *  consume per-paragraph raw-XML indent entries in document order. */
+    private function elementSignature($el): string
+    {
+        if ($el instanceof Title) {
+            $t = $el->getText();
+            if (is_string($t)) return $this->normaliseSig($t);
+            if ($t instanceof AbstractContainer) return $this->normaliseSig($this->joinElementText($t));
+            return '';
+        }
+        if ($el instanceof AbstractContainer) {
+            return $this->normaliseSig($this->joinElementText($el));
+        }
+        return '';
+    }
+
+    /** Recursively join Text/Link element text strings. */
+    private function joinElementText(AbstractContainer $run): string
+    {
+        $out = '';
+        foreach ($run->getElements() as $sub) {
+            if ($sub instanceof Text) $out .= (string) $sub->getText();
+            elseif ($sub instanceof Link) $out .= (string) $sub->getText();
+            elseif ($sub instanceof TextRun) $out .= $this->joinElementText($sub);
+        }
+        return $out;
+    }
+
+    private function normaliseSig(string $text): string
+    {
+        $text = html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $sig = preg_replace('/\s+/u', ' ', trim($text));
+        return $sig === null ? '' : $sig;
     }
 
     /**
@@ -1290,6 +1492,24 @@ class TipTapConverter
             ? rtrim(rtrim(number_format(((float) $right) / 20.0, 2, '.', ''), '0'), '.') . 'pt'
             : null;
         return [$leftPt, $rightPt];
+    }
+
+    /**
+     * Resolve `<w:ind w:hanging>` (twips) to a CSS `text-indent` value.
+     * Hanging is the negative offset for the first line so list markers
+     * sit in the gutter while wrapped lines align under the body. We emit
+     * a NEGATIVE pt value (e.g. "-18pt") so the sandbox can apply it
+     * directly as `text-indent`.
+     */
+    private function paragraphHangingIndent($pStyle): ?string
+    {
+        if (!is_object($pStyle) || !method_exists($pStyle, 'getIndentation')) return null;
+        $ind = $pStyle->getIndentation();
+        if (!is_object($ind) || !method_exists($ind, 'getHanging')) return null;
+        $h = $ind->getHanging();
+        if ($h === null || (float) $h <= 0) return null;
+        $pt = ((float) $h) / 20.0;
+        return '-' . rtrim(rtrim(number_format($pt, 2, '.', ''), '0'), '.') . 'pt';
     }
 
     /** True when the paragraph carries any non-"none" pBdr top border. */
