@@ -39,6 +39,9 @@ class RawXmlIndex
      *  paragraph styles whose definition carries `<w:pageBreakBefore/>`. */
     private string $stylesXmlCached = '';
 
+    /** Cached `word/numbering.xml` (read at construct time). */
+    private string $numberingXmlCached = '';
+
     /**
      * @var array<string,list<string>> heading text → ordered list of anchors.
      * When the same heading text appears twice (e.g. "موقع العمل" appears as
@@ -89,6 +92,7 @@ class RawXmlIndex
         }
         $this->xml = (string) $zip->getFromName('word/document.xml');
         $this->stylesXmlCached = (string) ($zip->getFromName('word/styles.xml') ?: '');
+        $this->numberingXmlCached = (string) ($zip->getFromName('word/numbering.xml') ?: '');
         // Header/footer parts. We prefer the default (non-first/non-even) variant
         // because that's what every page after the cover uses; for this doc all
         // three header variants share the same logo block. Footer1.xml is the
@@ -130,6 +134,11 @@ class RawXmlIndex
                     $this->bookmarkText[$e['anchor']] = $e['text'];
                 }
             }
+        }
+        // Fallback: walk numbering.xml for any heading whose text the TOC
+        // didn't supply a number for (e.g. doc with stale TOC field).
+        if ($this->numberingXmlCached !== '') {
+            $this->buildHeadingNumbersFromNumbering($this->numberingXmlCached);
         }
     }
 

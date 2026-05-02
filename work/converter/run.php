@@ -1,5 +1,6 @@
 <?php
 require __DIR__ . '/../../vendor/autoload.php';
+require __DIR__ . '/ConverterConfig.php';
 require __DIR__ . '/RawXmlIndex.php';
 require __DIR__ . '/TipTapConverter.php';
 
@@ -7,9 +8,10 @@ $src = $argv[1] ?? __DIR__ . '/../../testing-documents/التشغيل-والصي
 $out = $argv[2] ?? __DIR__ . '/../output/v2.json';
 
 $start = microtime(true);
-$conv = new \PhpWord\TipTap\TipTapConverter();
+$config = new \PhpWord\TipTap\ConverterConfig();
+$conv = new \PhpWord\TipTap\TipTapConverter($config);
 $doc = $conv->convertFile($src);
-if ($conv->arabicIndicNumerals) {
+if ($conv->config->arabicIndicNumerals) {
     $doc = \PhpWord\TipTap\TipTapConverter::applyArabicIndicNumerals($doc);
 }
 $elapsed = microtime(true) - $start;

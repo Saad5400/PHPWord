@@ -176,8 +176,10 @@
     color: #fff;
     padding: 12px;
     font-size: 13px;
+    direction: rtl;
+    text-align: right;
   }
-  .doc-header .logo-cell p { margin: 0; color: inherit; line-height: 1.2; }
+  .doc-header .logo-cell p { margin: 0; color: inherit; line-height: 1.2; text-align: right; }
   .doc-header .header-lines {
     display: flex;
     flex-direction: column;
@@ -256,6 +258,28 @@
   #page ul, #page ol { padding-inline-start: 2em; margin: 0.4em 0; }
   #page li { margin: 0.15em 0; }
   #page li > p { margin: 0; }
+
+  /* RTL list rendering — when a list (or any of its items) carries dir="rtl",
+     flip the list padding to the trailing edge so markers appear on the right.
+     Without this, the lettered Arabic items (ا. ب. ج.) collapse against the
+     left edge and lose their hanging indent. */
+  #page ol[dir="rtl"], #page ul[dir="rtl"],
+  #page ol:has(> li[dir="rtl"]), #page ul:has(> li[dir="rtl"]) {
+    padding-inline-start: 0;
+    padding-inline-end: 2.5em;
+  }
+  #page li[dir="rtl"] {
+    direction: rtl;
+    text-align: right;
+  }
+
+  /* Section-divider spacing — when a page-break is immediately followed by a
+     top-level heading, give the heading extra breathing room so it visually
+     starts a new section. */
+  .page-break + h1, .page-break + h2 {
+    margin-top: 64px;
+    padding-top: 24px;
+  }
   #page blockquote {
     border-inline-start: 3px solid #ccc;
     padding-inline-start: 12px;
@@ -387,8 +411,179 @@
   // Replaces @tiptap/html's generateHTML, which strips inline `style` from
   // mark renderHTML output. We walk the TipTap doc JSON ourselves, emitting
   // strings for blocks/inlines and keeping every styling attribute intact.
+  //
+  // Downstream projects can drop in TipTapRenderer and override any node or
+  // mark with no fork required:
+  //
+  //   const renderer = new TipTapRenderer({
+  //     nodeRenderers: {
+  //       pageBreak: () => '<hr class="my-break" />',
+  //       table: (node, ctx) => myTablePlugin.render(node),
+  //     },
+  //     markRenderers: {
+  //       link: (m) => ({ tag: 'a', attrs: { href: m.attrs.href, class: 'ext-link' } }),
+  //     },
+  //   });
+  //   document.getElementById('page').innerHTML = renderer.render(doc);
 
-  const MARK_RENDERERS = {
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  }
+
+  function escapeAttr(s) {
+    return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  function attrString(attrs) {
+    if (!attrs) return '';
+    const parts = [];
+    for (const [k, v] of Object.entries(attrs)) {
+      if (v == null || v === '') continue;
+      parts.push(`${k}="${escapeAttr(String(v))}"`);
+    }
+    return parts.length ? ' ' + parts.join(' ') : '';
+  }
+
+  function openTag(tag, attrs) {
+    return `<${tag}${attrString(attrs)}>`;
+  }
+
+  function extractText(node) {
+    const buf = [];
+    flattenText(node, buf);
+    return buf.join('');
+  }
+
+  // Stable mark-application order: textStyle innermost, then formatting,
+  // then link outermost. This matches TipTap's typical render priority and
+  // ensures `<a><strong><span style=...>text</span></strong></a>`.
+  const MARK_ORDER = ['textStyle', 'subscript', 'superscript', 'code', 'strike', 'underline', 'italic', 'bold', 'link'];
+
+  class TipTapRenderer {
+    constructor({ nodeRenderers = {}, markRenderers = {} } = {}) {
+      this._nodeRenderers = { ...TipTapRenderer.DEFAULT_NODE_RENDERERS, ...nodeRenderers };
+      this._markRenderers = { ...TipTapRenderer.DEFAULT_MARK_RENDERERS, ...markRenderers };
+    }
+
+    render(doc) {
+      return this._renderChildren(this._groupHeaderFooter((doc && doc.content) || []));
+    }
+
+    _renderChildren(content) {
+      if (!Array.isArray(content)) return '';
+      let out = '';
+      for (const child of content) {
+        const r = this._nodeRenderers[child.type];
+        if (!r) {
+          if (Array.isArray(child.content)) out += this._renderChildren(child.content);
+          continue;
+        }
+        out += r(child, this);
+      }
+      return out;
+    }
+
+    _renderMarks(text, marks) {
+      if (!marks || !marks.length) return escapeHtml(text);
+      const sortedMarks = [...marks].sort((a, b) => {
+        const ai = MARK_ORDER.indexOf(a.type);
+        const bi = MARK_ORDER.indexOf(b.type);
+        return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+      });
+      let html = escapeHtml(text);
+      for (const m of sortedMarks) {
+        const renderer = this._markRenderers[m.type];
+        if (!renderer) continue;
+        const spec = renderer(m, this);
+        if (!spec) continue;
+        html = openTag(spec.tag, spec.attrs) + html + `</${spec.tag}>`;
+      }
+      return html;
+    }
+
+    _styleFromBlockAttrs(node) {
+      const a = node.attrs || {};
+      const decls = [];
+      if (a.textAlign) decls.push(`text-align: ${a.textAlign}`);
+      if (a.indent != null && a.indent !== '') {
+        const v = typeof a.indent === 'number' ? `${a.indent}px` : String(a.indent);
+        decls.push(`padding-inline-start: ${v}`);
+      }
+      if (a.marginRight != null && a.marginRight !== '') {
+        const v = typeof a.marginRight === 'number' ? `${a.marginRight}px` : String(a.marginRight);
+        decls.push(`margin-inline-end: ${v}`);
+      }
+      if (a.marginLeft != null && a.marginLeft !== '') {
+        const v = typeof a.marginLeft === 'number' ? `${a.marginLeft}px` : String(a.marginLeft);
+        decls.push(`margin-inline-start: ${v}`);
+      }
+      if (a.backgroundColor) decls.push(`background-color: ${a.backgroundColor}`);
+      if (a.color && node.type === 'heading') decls.push(`color: ${a.color}`);
+      return decls.length ? decls.join('; ') : null;
+    }
+
+    _blockAttrs(node, extra = {}) {
+      const a = node.attrs || {};
+      const out = { ...extra };
+      if (a.id) out.id = a.id;
+      if (a.dir) out.dir = a.dir;
+      if (a.styleName) out['data-style'] = a.styleName;
+      const style = this._styleFromBlockAttrs(node);
+      if (style) out.style = style;
+      return out;
+    }
+
+    _renderCell(tag, n) {
+      const a = n.attrs || {};
+      const attrs = this._blockAttrs(n);
+      if (a.colspan && a.colspan > 1) attrs.colspan = a.colspan;
+      if (a.rowspan && a.rowspan > 1) attrs.rowspan = a.rowspan;
+      if (Array.isArray(a.colwidth) && a.colwidth.length === 1 && a.colwidth[0]) {
+        const prev = attrs.style ? attrs.style.replace(/;\s*$/, '') : '';
+        attrs.style = (prev ? prev + '; ' : '') + `width: ${a.colwidth[0]}px`;
+      }
+      return `<${tag}${attrString(attrs)}>${this._renderChildren(n.content)}</${tag}>`;
+    }
+
+    // Group the first 4 nodes into a synthetic doc-header wrapper when the
+    // first node looks like the institutional logo paragraph (textAlign=left
+    // with text "شعار الجهة"), and group the trailing horizontalRule + 4
+    // metadata paragraphs into a doc-footer wrapper when the final paragraph
+    // contains the contract-number marker. Rendering-only — the underlying
+    // TipTap JSON is unchanged.
+    _groupHeaderFooter(content) {
+      if (!Array.isArray(content) || content.length === 0) return content;
+      const out = content.slice();
+
+      const first = out[0];
+      const firstText = first && first.type === 'paragraph' && extractText(first);
+      if (
+        first && first.type === 'paragraph' &&
+        first.attrs && first.attrs.textAlign === 'left' &&
+        firstText && firstText.includes('شعار الجهة') &&
+        out.length >= 4
+      ) {
+        const headerNodes = out.splice(0, 4);
+        out.unshift({ type: '__doc_header__', content: headerNodes });
+      }
+
+      const lastIdx = out.length - 1;
+      const last = out[lastIdx];
+      const lastText = last && last.type === 'paragraph' && extractText(last);
+      if (
+        last && last.type === 'paragraph' &&
+        lastText && lastText.includes('رقم العقد') &&
+        lastIdx >= 4 && out[lastIdx - 4] && out[lastIdx - 4].type === 'horizontalRule'
+      ) {
+        const footerNodes = out.splice(lastIdx - 4, 5);
+        out.push({ type: '__doc_footer__', content: footerNodes });
+      }
+
+      return out;
+    }
+  }
+
+  TipTapRenderer.DEFAULT_MARK_RENDERERS = {
     bold:        () => ({ tag: 'strong' }),
     italic:      () => ({ tag: 'em' }),
     underline:   () => ({ tag: 'u' }),
@@ -430,82 +625,36 @@
     },
   };
 
-  // Stable mark-application order: textStyle innermost, then formatting,
-  // then link outermost. This matches TipTap's typical render priority and
-  // ensures `<a><strong><span style=...>text</span></strong></a>`.
-  const MARK_ORDER = ['textStyle', 'subscript', 'superscript', 'code', 'strike', 'underline', 'italic', 'bold', 'link'];
-
-  function renderMarks(text, marks) {
-    if (!marks || !marks.length) return escapeHtml(text);
-    const sortedMarks = [...marks].sort((a, b) => {
-      const ai = MARK_ORDER.indexOf(a.type);
-      const bi = MARK_ORDER.indexOf(b.type);
-      return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
-    });
-    let html = escapeHtml(text);
-    for (const m of sortedMarks) {
-      const renderer = MARK_RENDERERS[m.type];
-      if (!renderer) continue;
-      const spec = renderer(m);
-      if (!spec) continue;
-      html = openTag(spec.tag, spec.attrs) + html + `</${spec.tag}>`;
-    }
-    return html;
-  }
-
-  function styleFromBlockAttrs(node) {
-    const a = node.attrs || {};
-    const decls = [];
-    if (a.textAlign) decls.push(`text-align: ${a.textAlign}`);
-    if (a.indent != null && a.indent !== '') {
-      const v = typeof a.indent === 'number' ? `${a.indent}px` : String(a.indent);
-      decls.push(`padding-inline-start: ${v}`);
-    }
-    if (a.backgroundColor) decls.push(`background-color: ${a.backgroundColor}`);
-    if (a.color && node.type === 'heading') decls.push(`color: ${a.color}`);
-    return decls.length ? decls.join('; ') : null;
-  }
-
-  function blockAttrs(node, extra = {}) {
-    const a = node.attrs || {};
-    const out = { ...extra };
-    if (a.id) out.id = a.id;
-    if (a.dir) out.dir = a.dir;
-    if (a.styleName) out['data-style'] = a.styleName;
-    const style = styleFromBlockAttrs(node);
-    if (style) out.style = style;
-    return out;
-  }
-
-  const NODE_RENDERERS = {
-    doc: (n) => renderChildren(n.content),
-    paragraph: (n) => `<p${attrString(blockAttrs(n, { 'data-type': 'paragraph' }))}>${renderChildren(n.content)}</p>`,
-    heading: (n) => {
+  TipTapRenderer.DEFAULT_NODE_RENDERERS = {
+    doc:         (n, ctx) => ctx._renderChildren(n.content),
+    paragraph:   (n, ctx) => `<p${attrString(ctx._blockAttrs(n, { 'data-type': 'paragraph' }))}>${ctx._renderChildren(n.content)}</p>`,
+    heading: (n, ctx) => {
       const lvl = Math.min(6, Math.max(1, (n.attrs && n.attrs.level) || 1));
-      return `<h${lvl}${attrString(blockAttrs(n))}>${renderChildren(n.content)}</h${lvl}>`;
+      return `<h${lvl}${attrString(ctx._blockAttrs(n))}>${ctx._renderChildren(n.content)}</h${lvl}>`;
     },
-    bulletList: (n) => `<ul${attrString(blockAttrs(n))}>${renderChildren(n.content)}</ul>`,
-    orderedList: (n) => `<ol${attrString(blockAttrs(n))}>${renderChildren(n.content)}</ol>`,
-    listItem: (n) => `<li${attrString(blockAttrs(n))}>${renderChildren(n.content)}</li>`,
-    blockquote: (n) => `<blockquote${attrString(blockAttrs(n))}>${renderChildren(n.content)}</blockquote>`,
-    codeBlock: (n) => `<pre${attrString(blockAttrs(n))}><code>${renderChildren(n.content)}</code></pre>`,
+    bulletList:  (n, ctx) => `<ul${attrString(ctx._blockAttrs(n))}>${ctx._renderChildren(n.content)}</ul>`,
+    orderedList: (n, ctx) => `<ol${attrString(ctx._blockAttrs(n))}>${ctx._renderChildren(n.content)}</ol>`,
+    listItem:    (n, ctx) => `<li${attrString(ctx._blockAttrs(n))}>${ctx._renderChildren(n.content)}</li>`,
+    blockquote:  (n, ctx) => `<blockquote${attrString(ctx._blockAttrs(n))}>${ctx._renderChildren(n.content)}</blockquote>`,
+    codeBlock:   (n, ctx) => `<pre${attrString(ctx._blockAttrs(n))}><code>${ctx._renderChildren(n.content)}</code></pre>`,
     horizontalRule: () => `<hr>`,
-    hardBreak: () => `<br>`,
-    pageBreak: () => `<div class="page-break"><span>— فاصل الصفحة —</span></div>`,
-    __doc_header__: (n) => {
+    hardBreak:      () => `<br>`,
+    pageBreak:      () => `<div class="page-break"><span>— فاصل الصفحة —</span></div>`,
+    __doc_header__: (n, ctx) => {
       const kids = n.content || [];
       const logoNode = kids[0];
       const lineNodes = kids.slice(1);
-      const logoHtml = logoNode ? (NODE_RENDERERS.paragraph(logoNode)) : '';
+      const paraR = ctx._nodeRenderers.paragraph;
+      const logoHtml = logoNode ? paraR(logoNode, ctx) : '';
       let linesHtml = '';
-      for (const p of lineNodes) linesHtml += NODE_RENDERERS.paragraph(p);
+      for (const p of lineNodes) linesHtml += paraR(p, ctx);
       return `<div class="doc-header"><div class="header-lines">${linesHtml}</div><div class="logo-cell">${logoHtml}</div></div>`;
     },
-    __doc_footer__: (n) => {
+    __doc_footer__: (n, ctx) => {
       let inner = '';
       for (const child of (n.content || [])) {
-        const r = NODE_RENDERERS[child.type];
-        if (r) inner += r(child);
+        const r = ctx._nodeRenderers[child.type];
+        if (r) inner += r(child, ctx);
       }
       return `<div class="doc-footer">${inner}</div>`;
     },
@@ -518,111 +667,19 @@
       if (a.title) out.title = a.title;
       return `<img${attrString(out)}>`;
     },
-    table: (n) => {
-      const inner = renderChildren(n.content);
-      const has_header = (n.content || []).some(row => (row.content || []).some(c => c.type === 'tableHeader'));
+    table: (n, ctx) => {
+      const inner = ctx._renderChildren(n.content);
       // Wrap in a single tbody (the schema doesn't model thead/tbody).
-      return `<table${attrString(blockAttrs(n, { class: 'tiptap-table' }))}><tbody>${inner}</tbody></table>`;
+      return `<table${attrString(ctx._blockAttrs(n, { class: 'tiptap-table' }))}><tbody>${inner}</tbody></table>`;
     },
-    tableRow: (n) => `<tr${attrString(blockAttrs(n))}>${renderChildren(n.content)}</tr>`,
-    tableCell: (n) => renderCell('td', n),
-    tableHeader: (n) => renderCell('th', n),
-    text: (n) => renderMarks(n.text || '', n.marks),
+    tableRow:    (n, ctx) => `<tr${attrString(ctx._blockAttrs(n))}>${ctx._renderChildren(n.content)}</tr>`,
+    tableCell:   (n, ctx) => ctx._renderCell('td', n),
+    tableHeader: (n, ctx) => ctx._renderCell('th', n),
+    text:        (n, ctx) => ctx._renderMarks(n.text || '', n.marks),
   };
 
-  function renderCell(tag, n) {
-    const a = n.attrs || {};
-    const attrs = blockAttrs(n);
-    if (a.colspan && a.colspan > 1) attrs.colspan = a.colspan;
-    if (a.rowspan && a.rowspan > 1) attrs.rowspan = a.rowspan;
-    if (Array.isArray(a.colwidth) && a.colwidth.length === 1 && a.colwidth[0]) {
-      const prev = attrs.style ? attrs.style.replace(/;\s*$/, '') : '';
-      attrs.style = (prev ? prev + '; ' : '') + `width: ${a.colwidth[0]}px`;
-    }
-    return `<${tag}${attrString(attrs)}>${renderChildren(n.content)}</${tag}>`;
-  }
-
-  function renderChildren(content) {
-    if (!Array.isArray(content)) return '';
-    let out = '';
-    for (const child of content) {
-      const r = NODE_RENDERERS[child.type];
-      if (!r) {
-        if (Array.isArray(child.content)) out += renderChildren(child.content);
-        continue;
-      }
-      out += r(child);
-    }
-    return out;
-  }
-
   function renderDocToHtml(doc) {
-    return renderChildren(groupHeaderFooter(doc.content || []));
-  }
-
-  // Group the first 4 nodes into a synthetic doc-header wrapper when the
-  // first node looks like the institutional logo paragraph (textAlign=left
-  // with text "شعار الجهة"), and group the trailing horizontalRule + 4
-  // metadata paragraphs into a doc-footer wrapper when the final paragraph
-  // contains the contract-number marker. This is rendering-only — the
-  // underlying TipTap JSON is unchanged.
-  function groupHeaderFooter(content) {
-    if (!Array.isArray(content) || content.length === 0) return content;
-    const out = content.slice();
-
-    const first = out[0];
-    const firstText = first && first.type === 'paragraph' && extractText(first);
-    if (
-      first && first.type === 'paragraph' &&
-      first.attrs && first.attrs.textAlign === 'left' &&
-      firstText && firstText.includes('شعار الجهة') &&
-      out.length >= 4
-    ) {
-      const headerNodes = out.splice(0, 4);
-      out.unshift({ type: '__doc_header__', content: headerNodes });
-    }
-
-    const lastIdx = out.length - 1;
-    const last = out[lastIdx];
-    const lastText = last && last.type === 'paragraph' && extractText(last);
-    if (
-      last && last.type === 'paragraph' &&
-      lastText && lastText.includes('رقم العقد') &&
-      lastIdx >= 4 && out[lastIdx - 4] && out[lastIdx - 4].type === 'horizontalRule'
-    ) {
-      const footerNodes = out.splice(lastIdx - 4, 5);
-      out.push({ type: '__doc_footer__', content: footerNodes });
-    }
-
-    return out;
-  }
-
-  function extractText(node) {
-    const buf = [];
-    flattenText(node, buf);
-    return buf.join('');
-  }
-
-  function attrString(attrs) {
-    if (!attrs) return '';
-    const parts = [];
-    for (const [k, v] of Object.entries(attrs)) {
-      if (v == null || v === '') continue;
-      parts.push(`${k}="${escapeAttr(String(v))}"`);
-    }
-    return parts.length ? ' ' + parts.join(' ') : '';
-  }
-
-  function openTag(tag, attrs) {
-    return `<${tag}${attrString(attrs)}>`;
-  }
-
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
-  }
-
-  function escapeAttr(s) {
-    return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    return new TipTapRenderer().render(doc);
   }
 
   main().catch(fail);

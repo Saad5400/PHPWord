@@ -50,65 +50,30 @@ class TipTapConverter
      *  body-paragraph default lineHeight so cells stay compact. */
     private bool $inTableCell = false;
 
-    /** Allow-list of font families to map to. Empty = pass-through. */
-    public array $allowedFonts = [];
-    public string $defaultFont = '';
-
-    /** CSS unit for emitted font sizes. PHPWord's reader already halves
-     *  `<w:sz>` half-points to whole points (AbstractPart::READ_SIZE), so
-     *  getSize() returns pt — we pass it through. */
-    public string $fontSizeUnit = 'pt';
-
-    /**
-     * Treat the document as RTL by default. When true, paragraphs/headings
-     * whose ParagraphStyle::isBidi() returns null (no explicit flag) still
-     * receive dir="rtl". The source we target has 782 of 902 paragraphs
-     * flagged <w:bidi/>, so RTL-by-default is the safer assumption.
-     */
-    public bool $defaultRtl = true;
-
-    /** Reconstruct the TOC paragraphs PHPWord drops, by parsing word/document.xml. */
-    public bool $reconstructToc = true;
-
-    /** Inject computed heading numbers ("1.", "2.") as a prefix on heading nodes. */
-    public bool $prefixHeadingNumbers = true;
-
-    /** Attach `attrs.id` to heading nodes from `<w:bookmarkStart w:name="_Toc...">`. */
-    public bool $emitBookmarkIds = true;
-
-    /** Patch SDT placeholder text into paragraphs whose plain runs match a known leader. */
-    public bool $patchSdtPlaceholders = true;
-
-    /**
-     * Prepend section header lines (corp band: country / agency / form name)
-     * extracted from word/header2.xml, plus a logo placeholder.
-     * Append footer lines from word/footer1.xml.
-     */
-    public bool $injectHeaderFooter = true;
-
-    /**
-     * Documents this converter's preferred numeral system. Not consulted
-     * inside convertFile() — substitution is done as a post-process pass
-     * via the public static {@see TipTapConverter::applyArabicIndicNumerals()}
-     * helper, which the caller (e.g. run.php) invokes against the returned
-     * doc tree. Kept as a property so callers have one place to read the
-     * default policy ("Arabic docs ⇒ Arabic-Indic everywhere").
-     */
-    public bool $arabicIndicNumerals = true;
-
-    /**
-     * Drop all empty paragraphs from the converter's output. Word documents
-     * pad with empty paragraphs for vertical layout (e.g. 7 spacers between
-     * the cover header and the cover title); in a flowing TipTap doc those
-     * stack as visible whitespace. Vertical rhythm is meant to come from
-     * `attrs.marginTop`/`marginBottom` on the surrounding non-empty
-     * paragraphs (see `paragraphMargins()`), not from empty `<p>` nodes.
-     * Set to false to preserve them.
-     */
-    public bool $dropEmptyParagraphs = true;
+    /** Tunable knobs (font allow-list, RTL default, header/footer injection,
+     *  empty-paragraph drop, etc.). Read-only inside the converter — callers
+     *  pass an instance via the constructor. */
+    public ConverterConfig $config;
 
     /** @var RawXmlIndex|null populated by convertFile() when raw-XML features are enabled. */
     private ?RawXmlIndex $rawIndex = null;
+
+    public function __construct(?ConverterConfig $config = null)
+    {
+        $this->config = $config ?? new ConverterConfig();
+    }
+
+    /**
+     * Apply the configured `nodeTypeMap` to a canonical TipTap node type
+     * name. Returns the input unchanged when the map has no entry. Used at
+     * every spot where the converter emits `['type' => 'X', ...]` so
+     * downstream plugins that rename a node (e.g. `pageBreak` →
+     * `customPageBreak`) get the renamed value without a fork.
+     */
+    private function nodeType(string $type): string
+    {
+        return $this->config->nodeTypeMap[$type] ?? $type;
+    }
 
     public function convertFile(string $path): array
     {
@@ -130,22 +95,22 @@ class TipTapConverter
         // mid-paragraph <w:br> or as style-level pageBreakBefore (Heading1).
         $content = $this->injectRawPageBreaks($content);
 
-        if ($this->reconstructToc) {
+        if ($this->config->reconstructToc) {
             $tocNodes = $this->buildTocNodes();
             if (!empty($tocNodes)) {
                 $insertAt = $this->findTocInsertionIndex($content);
                 array_splice($content, $insertAt, 0, $tocNodes);
                 // Page break after the last TOC node, before body content.
-                array_splice($content, $insertAt + count($tocNodes), 0, [['type' => 'pageBreak']]);
+                array_splice($content, $insertAt + count($tocNodes), 0, [['type' => $this->nodeType('pageBreak')]]);
             }
         }
 
-        if ($this->injectHeaderFooter && $this->rawIndex !== null) {
+        if ($this->config->injectHeaderFooter && $this->rawIndex !== null) {
             $headerNodes = $this->buildHeaderNodes();
             if (!empty($headerNodes)) {
                 array_splice($content, 0, 0, $headerNodes);
                 // Page break between the cover/header band and the TOC/body.
-                array_splice($content, count($headerNodes), 0, [['type' => 'pageBreak']]);
+                array_splice($content, count($headerNodes), 0, [['type' => $this->nodeType('pageBreak')]]);
             }
             $footerNodes = $this->buildFooterNodes();
             if (!empty($footerNodes)) {
@@ -153,8 +118,8 @@ class TipTapConverter
             }
         }
 
-        $doc = ['type' => 'doc', 'content' => $content];
-        if ($this->defaultRtl) {
+        $doc = ['type' => $this->nodeType('doc'), 'content' => $content];
+        if ($this->config->defaultRtl) {
             $doc['attrs'] = ['dir' => 'rtl'];
         }
         return $doc;
@@ -182,13 +147,13 @@ class TipTapConverter
                 if (!empty($logo['width']))  $imgAttrs['width']  = (int) $logo['width'];
                 if (!empty($logo['height'])) $imgAttrs['height'] = (int) $logo['height'];
                 $nodes[] = [
-                    'type' => 'paragraph',
+                    'type' => $this->nodeType('paragraph'),
                     'attrs' => ['textAlign' => 'left', 'dir' => 'rtl'],
-                    'content' => [['type' => 'image', 'attrs' => $imgAttrs]],
+                    'content' => [['type' => $this->nodeType('image'), 'attrs' => $imgAttrs]],
                 ];
                 continue;
             }
-            $textNode = ['type' => 'text', 'text' => $text];
+            $textNode = ['type' => $this->nodeType('text'), 'text' => $text];
             if ($isLogoPlaceholder) {
                 $textNode['marks'] = [[
                     'type' => 'textStyle',
@@ -196,7 +161,7 @@ class TipTapConverter
                 ]];
             }
             $nodes[] = [
-                'type' => 'paragraph',
+                'type' => $this->nodeType('paragraph'),
                 'attrs' => [
                     'textAlign' => $isLogoPlaceholder ? 'left' : 'right',
                     'dir' => 'rtl',
@@ -216,15 +181,15 @@ class TipTapConverter
     private function buildFooterNodes(): array
     {
         if ($this->rawIndex === null || empty($this->rawIndex->footerLines)) return [];
-        $nodes = [['type' => 'horizontalRule']];
+        $nodes = [['type' => $this->nodeType('horizontalRule')]];
         foreach ($this->rawIndex->footerLines as $line) {
             $text = $line['text'];
             if ($text === '') continue;
             $nodes[] = [
-                'type' => 'paragraph',
+                'type' => $this->nodeType('paragraph'),
                 'attrs' => ['textAlign' => 'right', 'dir' => 'rtl'],
                 'content' => [[
-                    'type' => 'text',
+                    'type' => $this->nodeType('text'),
                     'text' => $text,
                     'marks' => [[
                         'type' => 'textStyle',
@@ -268,7 +233,7 @@ class TipTapConverter
             $sig = $this->nodeTextSignature($node);
             if ($sig !== '' && isset($before[$sig])) {
                 if ($lastEmitted !== 'pageBreak') {
-                    $out[] = ['type' => 'pageBreak'];
+                    $out[] = ['type' => $this->nodeType('pageBreak')];
                     $lastEmitted = 'pageBreak';
                 }
             }
@@ -282,7 +247,7 @@ class TipTapConverter
             $lastEmitted = is_array($node) ? ($node['type'] ?? null) : null;
             if ($sig !== '' && isset($after[$sig])) {
                 if ($lastEmitted !== 'pageBreak') {
-                    $out[] = ['type' => 'pageBreak'];
+                    $out[] = ['type' => $this->nodeType('pageBreak')];
                     $lastEmitted = 'pageBreak';
                 }
             }
@@ -374,9 +339,9 @@ class TipTapConverter
         $tocHeading = $this->rawIndex->tocHeadingText;
         if ($tocHeading) {
             $nodes[] = [
-                'type' => 'heading',
+                'type' => $this->nodeType('heading'),
                 'attrs' => ['level' => 1, 'textAlign' => 'right', 'dir' => 'rtl', 'styleName' => 'TOCHeading'],
-                'content' => [['type' => 'text', 'text' => $tocHeading]],
+                'content' => [['type' => $this->nodeType('text'), 'text' => $tocHeading]],
             ];
         }
         foreach ($this->rawIndex->tocEntries as $e) {
@@ -389,7 +354,7 @@ class TipTapConverter
                 $num = $e['number'];
                 if (!preg_match('#[.)]\s*$#u', $num)) $num .= '.';
                 $content[] = [
-                    'type' => 'text',
+                    'type' => $this->nodeType('text'),
                     'text' => $num . ' ',
                     'marks' => [['type' => 'bold']],
                 ];
@@ -406,7 +371,7 @@ class TipTapConverter
                     ],
                 ];
             }
-            $titleNode = ['type' => 'text', 'text' => $e['text']];
+            $titleNode = ['type' => $this->nodeType('text'), 'text' => $e['text']];
             if ($titleMarks) $titleNode['marks'] = $titleMarks;
             $content[] = $titleNode;
             // Leader dots — a literal text run tagged via a textStyle mark
@@ -414,14 +379,14 @@ class TipTapConverter
             // "render this span as a flex-grow leader dot strip". We avoid
             // adding a new node type so the JSON stays vanilla TipTap.
             $content[] = [
-                'type' => 'text',
+                'type' => $this->nodeType('text'),
                 'text' => "\u{2009}", // narrow space placeholder; CSS draws the dots
                 'marks' => [['type' => 'textStyle', 'attrs' => ['fontFamily' => '__toc_leader__']]],
             ];
             // Page number.
             if (!empty($e['page'])) {
                 $content[] = [
-                    'type' => 'text',
+                    'type' => $this->nodeType('text'),
                     'text' => $e['page'],
                     'marks' => [['type' => 'textStyle', 'attrs' => ['fontFamily' => '__toc_page__']]],
                 ];
@@ -432,7 +397,7 @@ class TipTapConverter
             ];
             if ($level > 1) $attrs['indent'] = ($level - 1) * 24;
             $nodes[] = [
-                'type' => 'paragraph',
+                'type' => $this->nodeType('paragraph'),
                 'attrs' => $attrs,
                 'content' => $content,
             ];
@@ -479,7 +444,7 @@ class TipTapConverter
             if ($this->elementHasTopBorder($el)) {
                 $prev = end($out);
                 if (!(is_array($prev) && ($prev['type'] ?? null) === 'horizontalRule')) {
-                    $out[] = ['type' => 'horizontalRule'];
+                    $out[] = ['type' => $this->nodeType('horizontalRule')];
                 }
             }
 
@@ -494,7 +459,7 @@ class TipTapConverter
             $i++;
         }
 
-        if ($this->dropEmptyParagraphs) {
+        if ($this->config->dropEmptyParagraphs) {
             $out = array_values(array_filter($out, fn($n) => !$this->isEmptyParagraph($n)));
         }
 
@@ -562,7 +527,7 @@ class TipTapConverter
             $content = $this->convertInlineRun($el);
             $content = $this->maybePatchSdt($content);
             return [
-                'type' => 'paragraph',
+                'type' => $this->nodeType('paragraph'),
                 'attrs' => $this->paragraphAttrs($el->getParagraphStyle()),
                 'content' => $content,
             ];
@@ -581,15 +546,15 @@ class TipTapConverter
         if ($el instanceof Table) return $this->convertTable($el);
         if ($el instanceof TextBreak) {
             // empty paragraph for spacing
-            return ['type' => 'paragraph', 'attrs' => ['textAlign' => null, 'dir' => $this->defaultRtl ? 'rtl' : null], 'content' => []];
+            return ['type' => $this->nodeType('paragraph'), 'attrs' => ['textAlign' => null, 'dir' => $this->config->defaultRtl ? 'rtl' : null], 'content' => []];
         }
         if ($el instanceof PageBreak) {
-            return ['type' => 'pageBreak'];
+            return ['type' => $this->nodeType('pageBreak')];
         }
         if ($el instanceof Image) {
             return [
-                'type' => 'paragraph',
-                'attrs' => ['textAlign' => null, 'dir' => $this->defaultRtl ? 'rtl' : null],
+                'type' => $this->nodeType('paragraph'),
+                'attrs' => ['textAlign' => null, 'dir' => $this->config->defaultRtl ? 'rtl' : null],
                 'content' => [$this->buildImageNode($el)],
             ];
         }
@@ -615,14 +580,14 @@ class TipTapConverter
         }
         $headingColor = $this->dominantTextColor($content);
         if ($headingColor !== null) $attrs['color'] = $headingColor;
-        if ($this->emitBookmarkIds && $this->rawIndex !== null) {
+        if ($this->config->emitBookmarkIds && $this->rawIndex !== null) {
             $anchor = $this->rawIndex->consumeAnchor($headingText);
             if ($anchor !== null) $attrs['id'] = $anchor;
         }
         if ($this->rawIndex !== null && !empty($this->rawIndex->headingUnderlines[$headingText])) {
             $content = $this->applyUnderlineToTextNodes($content);
         }
-        if ($this->prefixHeadingNumbers && $this->rawIndex !== null) {
+        if ($this->config->prefixHeadingNumbers && $this->rawIndex !== null) {
             $number = $this->rawIndex->headingNumbers[$headingText] ?? null;
             if ($number !== null && $number !== '') {
                 // Prepend a dotted number + space text node. Keep the same
@@ -636,12 +601,12 @@ class TipTapConverter
                     }
                 }
                 $numberSuffix = preg_match('#[.)]\s*$#u', $number) ? ' ' : '. ';
-                $prefix = ['type' => 'text', 'text' => $number . $numberSuffix];
+                $prefix = ['type' => $this->nodeType('text'), 'text' => $number . $numberSuffix];
                 if ($marks) $prefix['marks'] = $marks;
                 array_unshift($content, $prefix);
             }
         }
-        return ['type' => 'heading', 'attrs' => $attrs, 'content' => $content];
+        return ['type' => $this->nodeType('heading'), 'attrs' => $attrs, 'content' => $content];
     }
 
     /**
@@ -672,7 +637,7 @@ class TipTapConverter
      */
     private function maybePatchSdt(array $content): array
     {
-        if (!$this->patchSdtPlaceholders || $this->rawIndex === null) return $content;
+        if (!$this->config->patchSdtPlaceholders || $this->rawIndex === null) return $content;
         if (empty($this->rawIndex->sdtPlaceholders)) return $content;
         $joined = $this->joinText($content);
         $sig = preg_replace('/\s+/u', ' ', trim($joined));
@@ -687,7 +652,7 @@ class TipTapConverter
                 break;
             }
         }
-        $node = ['type' => 'text', 'text' => $sdt];
+        $node = ['type' => $this->nodeType('text'), 'text' => $sdt];
         // SDT placeholder text in the source is red — override color to red so it
         // visually distinguishes the placeholder from the surrounding label.
         $sdtMarks = [];
@@ -789,7 +754,7 @@ class TipTapConverter
         $content = [];
 
         if (is_string($text)) {
-            if ($text !== '') $content[] = ['type' => 'text', 'text' => $this->decodeText($text)];
+            if ($text !== '') $content[] = ['type' => $this->nodeType('text'), 'text' => $this->decodeText($text)];
         } elseif ($text instanceof TextRun) {
             $content = $this->convertInlineRun($text);
             $pStyle = $text->getParagraphStyle();
@@ -816,7 +781,7 @@ class TipTapConverter
                 $node = $this->buildLinkNode($sub);
                 if ($node) $nodes[] = $node;
             } elseif ($sub instanceof TextBreak) {
-                $nodes[] = ['type' => 'hardBreak'];
+                $nodes[] = ['type' => $this->nodeType('hardBreak')];
             } elseif ($sub instanceof Image) {
                 $nodes[] = $this->buildImageNode($sub);
             } elseif ($sub instanceof Footnote) {
@@ -843,7 +808,7 @@ class TipTapConverter
         if ($this->fontStyleIsAllCaps($fontStyle)) {
             $text = mb_strtoupper($text, 'UTF-8');
         }
-        $node = ['type' => 'text', 'text' => $text];
+        $node = ['type' => $this->nodeType('text'), 'text' => $text];
         $marks = $this->buildMarks($fontStyle);
         if ($marks) $node['marks'] = $marks;
         return $node;
@@ -857,7 +822,7 @@ class TipTapConverter
         if ($this->fontStyleIsAllCaps($fontStyle)) {
             $text = mb_strtoupper($text, 'UTF-8');
         }
-        $node = ['type' => 'text', 'text' => $text];
+        $node = ['type' => $this->nodeType('text'), 'text' => $text];
         $marks = $this->buildMarks($fontStyle);
         $href = (string) $l->getSource();
         if ($href !== '' && !$l->isInternal()) {
@@ -919,7 +884,7 @@ class TipTapConverter
         if ($style && method_exists($style, 'getHeight') && $style->getHeight()) $attrs['height'] = (int) $style->getHeight();
         $alt = $img->getName();
         if ($alt) $attrs['alt'] = $alt;
-        return ['type' => 'image', 'attrs' => $attrs];
+        return ['type' => $this->nodeType('image'), 'attrs' => $attrs];
     }
 
     /** Group consecutive ListItemRun, supporting nesting by depth. Returns [node|null, count]. */
@@ -948,7 +913,7 @@ class TipTapConverter
 
         $rootDepth = 0;
         $rootNode = ['type' => $topType, 'content' => []];
-        if ($this->defaultRtl || $this->paragraphDir($firstTopItem->getParagraphStyle()) === 'rtl') {
+        if ($this->config->defaultRtl || $this->paragraphDir($firstTopItem->getParagraphStyle()) === 'rtl') {
             $rootNode['attrs'] = ['dir' => 'rtl'];
         }
         // Stack of open lists at each depth (index = depth). Each entry is [&listNode, &lastItem]
@@ -969,14 +934,14 @@ class TipTapConverter
                 $parent = &$stack[$parentDepth]['list'];
                 if (empty($parent['content'])) {
                     // Need a placeholder listItem to hang the deeper list off of
-                    $placeholderItem = ['type' => 'listItem', 'content' => [['type' => 'paragraph', 'attrs' => ['textAlign' => null, 'dir' => $this->defaultRtl ? 'rtl' : null], 'content' => []]]];
-                    if ($this->defaultRtl) $placeholderItem['attrs'] = ['dir' => 'rtl'];
+                    $placeholderItem = ['type' => $this->nodeType('listItem'), 'content' => [['type' => $this->nodeType('paragraph'), 'attrs' => ['textAlign' => null, 'dir' => $this->config->defaultRtl ? 'rtl' : null], 'content' => []]]];
+                    if ($this->config->defaultRtl) $placeholderItem['attrs'] = ['dir' => 'rtl'];
                     $parent['content'][] = $placeholderItem;
                 }
                 $lastIdx = count($parent['content']) - 1;
                 $childType = $this->listTypeFor($item, $depth);
                 $newList = ['type' => $childType, 'content' => []];
-                if ($this->defaultRtl) $newList['attrs'] = ['dir' => 'rtl'];
+                if ($this->config->defaultRtl) $newList['attrs'] = ['dir' => 'rtl'];
                 $parent['content'][$lastIdx]['content'][] = &$newList;
                 $stack[] = ['list' => &$newList];
                 unset($newList);
@@ -985,13 +950,13 @@ class TipTapConverter
             // Build the listItem
             $listItemContent = [
                 [
-                    'type' => 'paragraph',
+                    'type' => $this->nodeType('paragraph'),
                     'attrs' => $this->paragraphAttrs($item->getParagraphStyle()),
                     'content' => $this->convertInlineRun($item),
                 ],
             ];
             $current = &$stack[$depth]['list'];
-            $listItemNode = ['type' => 'listItem', 'content' => $listItemContent];
+            $listItemNode = ['type' => $this->nodeType('listItem'), 'content' => $listItemContent];
             $itemDir = $this->paragraphDir($item->getParagraphStyle());
             if ($itemDir !== null) $listItemNode['attrs'] = ['dir' => $itemDir];
             $current['content'][] = $listItemNode;
@@ -1069,7 +1034,7 @@ class TipTapConverter
                 }
                 $this->inTableCell = $prevInCell;
                 if (empty($cellNodes)) {
-                    $cellNodes[] = ['type' => 'paragraph', 'attrs' => ['textAlign' => null, 'dir' => $tableDir ?? ($this->defaultRtl ? 'rtl' : null)], 'content' => []];
+                    $cellNodes[] = ['type' => $this->nodeType('paragraph'), 'attrs' => ['textAlign' => null, 'dir' => $tableDir ?? ($this->config->defaultRtl ? 'rtl' : null)], 'content' => []];
                 }
                 // Apply cell shading as a textStyle backgroundColor mark on the
                 // first paragraph's text runs as a fallback — the sandbox's
@@ -1091,11 +1056,11 @@ class TipTapConverter
                 $w = $cell->getWidth();
                 if ($w) $cellAttrs['colwidth'] = [(int) round($w / 15)]; // twip→px approx (1px ≈ 15 twips)
                 if ($cellBg !== null) $cellAttrs['backgroundColor'] = $cellBg;
-                $cellsOut[] = ['type' => 'tableCell', 'attrs' => $cellAttrs, 'content' => $cellNodes];
+                $cellsOut[] = ['type' => $this->nodeType('tableCell'), 'attrs' => $cellAttrs, 'content' => $cellNodes];
             }
-            $rowsOut[] = ['type' => 'tableRow', 'content' => $cellsOut];
+            $rowsOut[] = ['type' => $this->nodeType('tableRow'), 'content' => $cellsOut];
         }
-        $tableNode = ['type' => 'table', 'content' => $rowsOut];
+        $tableNode = ['type' => $this->nodeType('table'), 'content' => $rowsOut];
         if ($tableDir !== null) $tableNode['attrs'] = ['dir' => $tableDir];
         return $tableNode;
     }
@@ -1108,7 +1073,7 @@ class TipTapConverter
             if ($bv === true) return 'rtl';
             if ($bv === false) return 'ltr';
         }
-        return $this->defaultRtl ? 'rtl' : null;
+        return $this->config->defaultRtl ? 'rtl' : null;
     }
 
     private function cellBackgroundColor(Cell $cell): ?string
@@ -1195,13 +1160,13 @@ class TipTapConverter
     /** Resolve dir attribute ("rtl"/"ltr") for a paragraph-style-bearing element. */
     private function paragraphDir($pStyle): ?string
     {
-        if (!is_object($pStyle)) return $this->defaultRtl ? 'rtl' : null;
+        if (!is_object($pStyle)) return $this->config->defaultRtl ? 'rtl' : null;
         if (method_exists($pStyle, 'isBidi')) {
             $bidi = $pStyle->isBidi();
             if ($bidi === true) return 'rtl';
             if ($bidi === false) return 'ltr';
         }
-        return $this->defaultRtl ? 'rtl' : null;
+        return $this->config->defaultRtl ? 'rtl' : null;
     }
 
     /**
@@ -1218,6 +1183,9 @@ class TipTapConverter
         ];
         $indent = $this->paragraphIndent($pStyle);
         if ($indent !== null) $attrs['indent'] = $indent;
+        [$marginLeft, $marginRight] = $this->paragraphSideMargins($pStyle);
+        if ($marginLeft !== null) $attrs['marginLeft'] = $marginLeft;
+        if ($marginRight !== null) $attrs['marginRight'] = $marginRight;
         $lh = $this->paragraphLineHeight($pStyle);
         if ($lh !== null) $attrs['lineHeight'] = $lh;
         [$mt, $mb] = $this->paragraphMargins($pStyle);
@@ -1298,6 +1266,32 @@ class TipTapConverter
         return $px;
     }
 
+    /**
+     * Resolve `<w:ind w:left>` / `<w:ind w:right>` (twips) into separate CSS
+     * pt values. Returns `[leftPt, rightPt]`, each null when the corresponding
+     * side is unset/zero. Twips → pt at 20:1 (20 twips per point).
+     *
+     * Emitted as `marginLeft` / `marginRight` on the paragraph's attrs so
+     * the sandbox walker can apply them as `margin-left`/`margin-right`
+     * inline styles. For RTL paragraphs `right` is the start indent (the
+     * "before-text" side) and `left` is the end indent.
+     */
+    private function paragraphSideMargins($pStyle): array
+    {
+        if (!is_object($pStyle) || !method_exists($pStyle, 'getIndentation')) return [null, null];
+        $ind = $pStyle->getIndentation();
+        if (!is_object($ind)) return [null, null];
+        $left = method_exists($ind, 'getLeft') ? $ind->getLeft() : null;
+        $right = method_exists($ind, 'getRight') ? $ind->getRight() : null;
+        $leftPt = ($left !== null && (float) $left > 0)
+            ? rtrim(rtrim(number_format(((float) $left) / 20.0, 2, '.', ''), '0'), '.') . 'pt'
+            : null;
+        $rightPt = ($right !== null && (float) $right > 0)
+            ? rtrim(rtrim(number_format(((float) $right) / 20.0, 2, '.', ''), '0'), '.') . 'pt'
+            : null;
+        return [$leftPt, $rightPt];
+    }
+
     /** True when the paragraph carries any non-"none" pBdr top border. */
     private function paragraphHasTopBorder($pStyle): bool
     {
@@ -1366,7 +1360,7 @@ class TipTapConverter
             // (Earlier the converter re-halved here, producing a 2× too small
             //  fontSize like "6pt" for body runs that should be 12pt.)
             $pt = (float) $size;
-            $tsAttrs['fontSize'] = $this->fontSizeUnit === 'px'
+            $tsAttrs['fontSize'] = $this->config->fontSizeUnit === 'px'
                 ? round($pt * 1.3333) . 'px'
                 : rtrim(rtrim(number_format($pt, 2, '.', ''), '0'), '.') . 'pt';
         }
@@ -1452,12 +1446,12 @@ class TipTapConverter
     private function mapFont(string $name): string
     {
         $name = trim($name, " \t\n\r\0\x0B\"'");
-        if (empty($this->allowedFonts)) return $name;
+        if (empty($this->config->allowedFonts)) return $name;
         $lower = strtolower($name);
-        foreach ($this->allowedFonts as $allowed) {
+        foreach ($this->config->allowedFonts as $allowed) {
             if (strtolower($allowed) === $lower) return $allowed;
         }
-        return $this->defaultFont ?: $name;
+        return $this->config->defaultFont ?: $name;
     }
 
     private function colorToHex(string $color): ?string
