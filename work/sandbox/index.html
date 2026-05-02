@@ -145,6 +145,60 @@
     margin: 0.18em 0;
     line-height: 1.4;
   }
+  /* Body line-height — overridden by inline `line-height` from JSON attrs. */
+  #page p[data-type="paragraph"] { line-height: 1.7; }
+  /* Page-break separator (rendered between Word page boundaries). */
+  .page-break {
+    margin: 48px -24px;
+    padding: 8px 24px;
+    background: #eef0f3;
+    border-top: 3px solid #b0b8c8;
+    border-bottom: 3px solid #b0b8c8;
+    text-align: center;
+    color: #888;
+    font-size: 10px;
+    letter-spacing: 1px;
+  }
+
+  /* Document header band (logo + 3 title lines, first 4 nodes). */
+  .doc-header {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 8px;
+    border-bottom: 2px solid #333;
+    padding: 12px 16px;
+    margin-bottom: 24px;
+    background: #f8f8f8;
+    direction: rtl;
+  }
+  .doc-header .logo-cell {
+    background: #222;
+    color: #fff;
+    padding: 12px;
+    font-size: 13px;
+  }
+  .doc-header .logo-cell p { margin: 0; color: inherit; line-height: 1.2; }
+  .doc-header .header-lines {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 4px;
+    font-size: 12px;
+  }
+  .doc-header .header-lines p { margin: 0; line-height: 1.3; }
+
+  /* Document footer band (last horizontalRule + 4 trailing paragraphs). */
+  .doc-footer {
+    border-top: 2px solid #333;
+    padding: 12px 16px;
+    margin-top: 24px;
+    background: #f8f8f8;
+    color: #666;
+    font-size: 11px;
+    direction: rtl;
+  }
+  .doc-footer p { margin: 2px 0; line-height: 1.4; }
   /* TOC1 entries (top-level: section banner titles) — slightly bolder,
      no extra start-padding. */
   #page p[data-style="TOC1"] {
@@ -159,7 +213,7 @@
      dots via ::before so the actual text content (a thin space) stays out
      of selection / accessibility surface. */
   #page p[data-style^="TOC"] .toc-leader {
-    flex: 1 1 auto;
+    flex: 1;
     overflow: hidden;
     white-space: nowrap;
     color: #888;
@@ -171,7 +225,7 @@
     min-width: 1em;
   }
   #page p[data-style^="TOC"] .toc-leader::before {
-    content: "...........................................................................................................................................................................................";
+    content: '..........................................................................................................................................................................................................';
     position: absolute;
     inset: 0;
     text-indent: 0;
@@ -181,13 +235,13 @@
     overflow: hidden;
     white-space: nowrap;
   }
-  /* Page number: small, slightly muted. */
+  /* Page number: small, slightly muted; pinned at the far left edge. */
   #page p[data-style^="TOC"] .toc-page {
-    flex: 0 0 auto;
+    flex-shrink: 0;
     color: #444;
     font-variant-numeric: tabular-nums;
-    min-width: 1.5em;
-    text-align: right;
+    min-width: 2em;
+    text-align: left;
   }
   /* TOC link styling — match body link, but no underline (reference is plain). */
   #page p[data-style^="TOC"] a {
@@ -425,7 +479,7 @@
 
   const NODE_RENDERERS = {
     doc: (n) => renderChildren(n.content),
-    paragraph: (n) => `<p${attrString(blockAttrs(n))}>${renderChildren(n.content)}</p>`,
+    paragraph: (n) => `<p${attrString(blockAttrs(n, { 'data-type': 'paragraph' }))}>${renderChildren(n.content)}</p>`,
     heading: (n) => {
       const lvl = Math.min(6, Math.max(1, (n.attrs && n.attrs.level) || 1));
       return `<h${lvl}${attrString(blockAttrs(n))}>${renderChildren(n.content)}</h${lvl}>`;
@@ -437,6 +491,24 @@
     codeBlock: (n) => `<pre${attrString(blockAttrs(n))}><code>${renderChildren(n.content)}</code></pre>`,
     horizontalRule: () => `<hr>`,
     hardBreak: () => `<br>`,
+    pageBreak: () => `<div class="page-break"><span>— فاصل الصفحة —</span></div>`,
+    __doc_header__: (n) => {
+      const kids = n.content || [];
+      const logoNode = kids[0];
+      const lineNodes = kids.slice(1);
+      const logoHtml = logoNode ? (NODE_RENDERERS.paragraph(logoNode)) : '';
+      let linesHtml = '';
+      for (const p of lineNodes) linesHtml += NODE_RENDERERS.paragraph(p);
+      return `<div class="doc-header"><div class="header-lines">${linesHtml}</div><div class="logo-cell">${logoHtml}</div></div>`;
+    },
+    __doc_footer__: (n) => {
+      let inner = '';
+      for (const child of (n.content || [])) {
+        const r = NODE_RENDERERS[child.type];
+        if (r) inner += r(child);
+      }
+      return `<div class="doc-footer">${inner}</div>`;
+    },
     image: (n) => {
       const a = n.attrs || {};
       const out = { src: a.src || '' };
@@ -485,7 +557,50 @@
   }
 
   function renderDocToHtml(doc) {
-    return renderChildren(doc.content);
+    return renderChildren(groupHeaderFooter(doc.content || []));
+  }
+
+  // Group the first 4 nodes into a synthetic doc-header wrapper when the
+  // first node looks like the institutional logo paragraph (textAlign=left
+  // with text "شعار الجهة"), and group the trailing horizontalRule + 4
+  // metadata paragraphs into a doc-footer wrapper when the final paragraph
+  // contains the contract-number marker. This is rendering-only — the
+  // underlying TipTap JSON is unchanged.
+  function groupHeaderFooter(content) {
+    if (!Array.isArray(content) || content.length === 0) return content;
+    const out = content.slice();
+
+    const first = out[0];
+    const firstText = first && first.type === 'paragraph' && extractText(first);
+    if (
+      first && first.type === 'paragraph' &&
+      first.attrs && first.attrs.textAlign === 'left' &&
+      firstText && firstText.includes('شعار الجهة') &&
+      out.length >= 4
+    ) {
+      const headerNodes = out.splice(0, 4);
+      out.unshift({ type: '__doc_header__', content: headerNodes });
+    }
+
+    const lastIdx = out.length - 1;
+    const last = out[lastIdx];
+    const lastText = last && last.type === 'paragraph' && extractText(last);
+    if (
+      last && last.type === 'paragraph' &&
+      lastText && lastText.includes('رقم العقد') &&
+      lastIdx >= 4 && out[lastIdx - 4] && out[lastIdx - 4].type === 'horizontalRule'
+    ) {
+      const footerNodes = out.splice(lastIdx - 4, 5);
+      out.push({ type: '__doc_footer__', content: footerNodes });
+    }
+
+    return out;
+  }
+
+  function extractText(node) {
+    const buf = [];
+    flattenText(node, buf);
+    return buf.join('');
   }
 
   function attrString(attrs) {

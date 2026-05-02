@@ -29,6 +29,17 @@ class RawXmlIndex
     public array $textToAnchor = [];
 
     /**
+     * @var array<string,bool> heading text → true when any run inside that
+     * heading paragraph carries `<w:u>` with a non-"none" value. Backup for
+     * cases where PHPWord's reader misses the underline at the run level.
+     */
+    public array $headingUnderlines = [];
+
+    /** Cached `word/styles.xml` (read at construct time) — used to discover
+     *  paragraph styles whose definition carries `<w:pageBreakBefore/>`. */
+    private string $stylesXmlCached = '';
+
+    /**
      * @var array<string,list<string>> heading text → ordered list of anchors.
      * When the same heading text appears twice (e.g. "موقع العمل" appears as
      * Heading3 in two different sections), the TOC has two distinct entries
@@ -77,6 +88,7 @@ class RawXmlIndex
             throw new \RuntimeException("Cannot open docx: $docxPath");
         }
         $this->xml = (string) $zip->getFromName('word/document.xml');
+        $this->stylesXmlCached = (string) ($zip->getFromName('word/styles.xml') ?: '');
         // Header/footer parts. We prefer the default (non-first/non-even) variant
         // because that's what every page after the cover uses; for this doc all
         // three header variants share the same logo block. Footer1.xml is the
@@ -96,6 +108,7 @@ class RawXmlIndex
         $this->extractTocEntries();
         $this->extractBookmarks();
         $this->extractSdtPlaceholders();
+        $this->extractHeadingUnderlines();
         if ($headerXml !== '') $this->headerLines = $this->extractPartLines($headerXml, true);
         if ($footerXml !== '') $this->footerLines = $this->extractPartLines($footerXml, false);
         // Populate heading numbers from the TOC field's rendered output
@@ -118,6 +131,102 @@ class RawXmlIndex
                 }
             }
         }
+    }
+
+    /**
+     * Indexes (into `$this->paragraphs`) where a hard page break should land,
+     * along with where the break sits relative to the paragraph. Sources:
+     *  - `<w:br w:type="page"/>` inside a paragraph → page break AFTER that
+     *    paragraph (PHPWord can't surface this through TextBreak).
+     *  - `<w:pageBreakBefore/>` inline in `<w:pPr>` → page break BEFORE it.
+     *  - Paragraphs whose pStyle's definition in styles.xml carries
+     *    `<w:pageBreakBefore/>` (e.g. Heading1) → page break BEFORE.
+     *
+     * Returns text signatures (normalized joined text) so the converter can
+     * match against its emitted node tree without having to track raw indexes
+     * past elements that PHPWord groups (tables, lists) or drops (SDT, TOC).
+     *
+     * @return array{after:array<string,bool>,before:array<string,bool>}
+     *   `after`  — text signatures of paragraphs after which a pageBreak goes
+     *   `before` — text signatures of paragraphs before which a pageBreak goes
+     */
+    public function getPageBreakSignatures(): array
+    {
+        $stylesWithPbb = $this->stylesWithPageBreakBefore();
+        $after = [];
+        $before = [];
+        foreach ($this->paragraphs as $idx => $p) {
+            $body = $p['xml'];
+            $sig = $this->signature($this->extractAllText($body));
+            // <w:br w:type="page"/> inside the paragraph — break after it
+            if (preg_match('#<w:br[^>]*w:type="page"#', $body)) {
+                if ($sig !== '') {
+                    $after[$sig] = true;
+                } elseif ($idx + 1 < count($this->paragraphs)) {
+                    // Empty para containing only the br — fall through to the next.
+                    $nextSig = $this->signature($this->extractAllText($this->paragraphs[$idx + 1]['xml']));
+                    if ($nextSig !== '') $before[$nextSig] = true;
+                }
+            }
+            // Inline <w:pageBreakBefore/> in pPr — break before
+            if (preg_match('#<w:pPr\b[^>]*>.*?<w:pageBreakBefore\b#s', $body)) {
+                if ($sig !== '') $before[$sig] = true;
+            }
+            // Paragraph style carries pageBreakBefore (e.g. Heading1)
+            if (preg_match('#<w:pStyle w:val="([^"]+)"#', $body, $m)) {
+                if (isset($stylesWithPbb[$m[1]]) && $sig !== '') {
+                    $before[$sig] = true;
+                }
+            }
+        }
+        return ['after' => $after, 'before' => $before];
+    }
+
+    /** Returns paragraph indexes that contain a `<w:br w:type="page"/>`. */
+    public function getPageBreakParagraphIndexes(): array
+    {
+        $idxs = [];
+        foreach ($this->paragraphs as $idx => $p) {
+            if (preg_match('#<w:br[^>]*w:type="page"#', $p['xml'])) {
+                $idxs[] = $idx;
+            }
+        }
+        return $idxs;
+    }
+
+    /** Read styles.xml once; return paragraph styles whose definition carries
+     *  `<w:pageBreakBefore/>` directly in their `<w:pPr>`. */
+    private function stylesWithPageBreakBefore(): array
+    {
+        static $cache = null;
+        if ($cache !== null) return $cache;
+        $cache = [];
+        $stylesXml = '';
+        // Already-closed zip — re-open via the docx path tracked in the constructor.
+        // We didn't keep the path; instead, peek at headerLogo's metadata isn't
+        // available, so do this from $this->xml relationships? Simplest: capture
+        // styles.xml at construct time. Fall through with an empty cache when
+        // styles aren't reachable.
+        if (isset($this->stylesXmlCached)) {
+            $stylesXml = $this->stylesXmlCached;
+        }
+        if ($stylesXml === '') return $cache;
+        if (!preg_match_all('#<w:style[^>]*w:styleId="([^"]+)"[^>]*>(.*?)</w:style>#s', $stylesXml, $m, PREG_SET_ORDER)) {
+            return $cache;
+        }
+        foreach ($m as $hit) {
+            if (preg_match('#<w:pageBreakBefore\b#', $hit[2])) {
+                $cache[$hit[1]] = true;
+            }
+        }
+        return $cache;
+    }
+
+    /** Normalise paragraph text to a stable signature for cross-source matching. */
+    private function signature(string $text): string
+    {
+        $sig = preg_replace('/\s+/u', ' ', trim($text));
+        return $sig === null ? '' : $sig;
     }
 
     /**
@@ -256,6 +365,25 @@ class RawXmlIndex
                     $this->textToAnchor[$text] = $name;
                 }
             }
+        }
+    }
+
+    /**
+     * Map heading text → true when the heading paragraph carries an inline
+     * `<w:u>` with a non-"none" value. Linked character styles (HeadingNChar)
+     * sometimes carry underline that PHPWord doesn't surface on each run; this
+     * is the backup signal for `buildHeadingNode()`.
+     */
+    private function extractHeadingUnderlines(): void
+    {
+        foreach ($this->paragraphs as $p) {
+            $body = $p['xml'];
+            if (!preg_match('#<w:pStyle w:val="(Heading\d|Title)"#', $body)) continue;
+            if (!preg_match('#<w:u\s[^/>]*w:val="([^"]+)"#', $body, $m)) continue;
+            if (strcasecmp($m[1], 'none') === 0) continue;
+            $text = trim($this->extractAllText($body));
+            if ($text === '') continue;
+            $this->headingUnderlines[$text] = true;
         }
     }
 

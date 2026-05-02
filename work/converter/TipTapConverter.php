@@ -46,6 +46,10 @@ class TipTapConverter
     private $numberingById = [];
     private $numberingByName = [];
 
+    /** True while converting elements inside a table cell. Suppresses the
+     *  body-paragraph default lineHeight so cells stay compact. */
+    private bool $inTableCell = false;
+
     /** Allow-list of font families to map to. Empty = pass-through. */
     public array $allowedFonts = [];
     public string $defaultFont = '';
@@ -120,11 +124,19 @@ class TipTapConverter
             $content = array_merge($content, $this->processContainer($section));
         }
 
+        // Inject pageBreak nodes at every <w:br w:type="page"/> /
+        // <w:pageBreakBefore/> position the raw XML carries. PHPWord's
+        // PageBreak element only surfaces a subset of these; the rest live as
+        // mid-paragraph <w:br> or as style-level pageBreakBefore (Heading1).
+        $content = $this->injectRawPageBreaks($content);
+
         if ($this->reconstructToc) {
             $tocNodes = $this->buildTocNodes();
             if (!empty($tocNodes)) {
                 $insertAt = $this->findTocInsertionIndex($content);
                 array_splice($content, $insertAt, 0, $tocNodes);
+                // Page break after the last TOC node, before body content.
+                array_splice($content, $insertAt + count($tocNodes), 0, [['type' => 'pageBreak']]);
             }
         }
 
@@ -132,6 +144,8 @@ class TipTapConverter
             $headerNodes = $this->buildHeaderNodes();
             if (!empty($headerNodes)) {
                 array_splice($content, 0, 0, $headerNodes);
+                // Page break between the cover/header band and the TOC/body.
+                array_splice($content, count($headerNodes), 0, [['type' => 'pageBreak']]);
             }
             $footerNodes = $this->buildFooterNodes();
             if (!empty($footerNodes)) {
@@ -230,6 +244,72 @@ class TipTapConverter
      * if no match (a defensive edge case — the TOC was generated against
      * heading anchors so they should always be present).
      */
+    /**
+     * Walk converted content and insert `pageBreak` nodes for every page
+     * boundary the raw XML knows about (mid-paragraph `<w:br w:type="page"/>`
+     * and style-level `<w:pageBreakBefore/>`). PHPWord's `PageBreak` element
+     * only surfaces the subset that lives as a standalone empty paragraph;
+     * everything else has to come from the raw-XML signature map.
+     *
+     * Matching is done by normalised joined text. We avoid duplicate breaks:
+     * if the previous (or next) emitted node is already a `pageBreak`, skip.
+     */
+    private function injectRawPageBreaks(array $content): array
+    {
+        if ($this->rawIndex === null) return $content;
+        $sigs = $this->rawIndex->getPageBreakSignatures();
+        $after = $sigs['after'] ?? [];
+        $before = $sigs['before'] ?? [];
+        if (empty($after) && empty($before)) return $content;
+
+        $out = [];
+        $lastEmitted = null;
+        foreach ($content as $node) {
+            $sig = $this->nodeTextSignature($node);
+            if ($sig !== '' && isset($before[$sig])) {
+                if ($lastEmitted !== 'pageBreak') {
+                    $out[] = ['type' => 'pageBreak'];
+                    $lastEmitted = 'pageBreak';
+                }
+            }
+            // Drop empty/hardBreak-only paragraphs adjacent to a page break.
+            // These come from `<w:br w:type="page"/>` runs PHPWord surfaced as
+            // a hardBreak; the page break itself is already represented.
+            if ($lastEmitted === 'pageBreak' && $this->isHardBreakOnlyParagraph($node)) {
+                continue;
+            }
+            $out[] = $node;
+            $lastEmitted = is_array($node) ? ($node['type'] ?? null) : null;
+            if ($sig !== '' && isset($after[$sig])) {
+                if ($lastEmitted !== 'pageBreak') {
+                    $out[] = ['type' => 'pageBreak'];
+                    $lastEmitted = 'pageBreak';
+                }
+            }
+        }
+        return $out;
+    }
+
+    /** Normalised joined text of a top-level block node, used to match against
+     *  RawXmlIndex page-break signatures. Returns '' for non-text-bearing
+     *  nodes (tables, page breaks, horizontal rules). Strips any leading
+     *  multi-level number prefix (e.g. "1.", "1.2.3.") that buildHeadingNode
+     *  prepends — raw XML carries the heading text only. */
+    private function nodeTextSignature($node): string
+    {
+        if (!is_array($node)) return '';
+        $type = $node['type'] ?? null;
+        if ($type !== 'paragraph' && $type !== 'heading') return '';
+        $content = $node['content'] ?? [];
+        if (!is_array($content) || empty($content)) return '';
+        $text = $this->joinText($content);
+        $text = preg_replace('/\s+/u', ' ', trim($text));
+        if ($text === null) return '';
+        // Strip leading numbering prefix: "1.", "1.1.", "1.2.3.", "1)", etc.
+        $stripped = preg_replace('/^[\d٠-٩]+(?:[.)][\d٠-٩]+)*[.)]?\s+/u', '', $text);
+        return $stripped !== null ? $stripped : $text;
+    }
+
     private function findTocInsertionIndex(array $content): int
     {
         if ($this->rawIndex === null || empty($this->rawIndex->tocEntries)) return 0;
@@ -434,6 +514,21 @@ class TipTapConverter
             && empty($n['content']);
     }
 
+    /** True for `paragraph` nodes whose content is empty or contains only
+     *  hardBreak nodes — used to drop the residue of a `<w:br w:type="page"/>`
+     *  paragraph PHPWord surfaced as a TextBreak. */
+    private function isHardBreakOnlyParagraph($n): bool
+    {
+        if (!is_array($n) || ($n['type'] ?? null) !== 'paragraph') return false;
+        $content = $n['content'] ?? [];
+        if (empty($content)) return true;
+        foreach ($content as $c) {
+            if (!is_array($c)) return false;
+            if (($c['type'] ?? null) !== 'hardBreak') return false;
+        }
+        return true;
+    }
+
     private function elementHasTopBorder($el): bool
     {
         if ($el instanceof TextRun || $el instanceof ListItemRun) {
@@ -489,8 +584,7 @@ class TipTapConverter
             return ['type' => 'paragraph', 'attrs' => ['textAlign' => null, 'dir' => $this->defaultRtl ? 'rtl' : null], 'content' => []];
         }
         if ($el instanceof PageBreak) {
-            // Use horizontalRule as a visual separator. (TipTap has no native pageBreak.)
-            return ['type' => 'horizontalRule'];
+            return ['type' => 'pageBreak'];
         }
         if ($el instanceof Image) {
             return [
@@ -510,7 +604,11 @@ class TipTapConverter
     private function buildHeadingNode(int $level, array $content, $pStyle): array
     {
         $headingText = $this->joinText($content);
-        $attrs = ['level' => $level] + $this->paragraphAttrs($pStyle);
+        $paraAttrs = $this->paragraphAttrs($pStyle);
+        // Headings get their line-height from the heading CSS, not the body default.
+        $hasExplicitLh = $this->paragraphLineHeight($pStyle) !== null;
+        if (!$hasExplicitLh) unset($paraAttrs['lineHeight']);
+        $attrs = ['level' => $level] + $paraAttrs;
         if (is_object($pStyle) && method_exists($pStyle, 'getStyleName')) {
             $sn = (string) $pStyle->getStyleName();
             if ($sn !== '') $attrs['styleName'] = $sn;
@@ -520,6 +618,9 @@ class TipTapConverter
         if ($this->emitBookmarkIds && $this->rawIndex !== null) {
             $anchor = $this->rawIndex->consumeAnchor($headingText);
             if ($anchor !== null) $attrs['id'] = $anchor;
+        }
+        if ($this->rawIndex !== null && !empty($this->rawIndex->headingUnderlines[$headingText])) {
+            $content = $this->applyUnderlineToTextNodes($content);
         }
         if ($this->prefixHeadingNumbers && $this->rawIndex !== null) {
             $number = $this->rawIndex->headingNumbers[$headingText] ?? null;
@@ -541,6 +642,28 @@ class TipTapConverter
             }
         }
         return ['type' => 'heading', 'attrs' => $attrs, 'content' => $content];
+    }
+
+    /**
+     * Add an `underline` mark to every text node in $content that doesn't
+     * already carry one. Used by buildHeadingNode() when RawXmlIndex flagged
+     * the heading paragraph as carrying `<w:u>` but PHPWord didn't surface
+     * underline at the run level.
+     */
+    private function applyUnderlineToTextNodes(array $content): array
+    {
+        foreach ($content as $i => $n) {
+            if (($n['type'] ?? null) !== 'text') continue;
+            $marks = $n['marks'] ?? [];
+            $hasUnderline = false;
+            foreach ($marks as $m) {
+                if (($m['type'] ?? null) === 'underline') { $hasUnderline = true; break; }
+            }
+            if ($hasUnderline) continue;
+            $marks[] = ['type' => 'underline'];
+            $content[$i]['marks'] = $marks;
+        }
+        return $content;
     }
 
     /**
@@ -927,6 +1050,8 @@ class TipTapConverter
             foreach ($row->getCells() as $cell) {
                 $cellBg = $this->cellBackgroundColor($cell);
                 $cellNodes = [];
+                $prevInCell = $this->inTableCell;
+                $this->inTableCell = true;
                 foreach ($cell->getElements() as $sub) {
                     if ($sub instanceof ListItemRun) {
                         // Single-item list inside a cell (we don't try to merge across cells)
@@ -942,6 +1067,7 @@ class TipTapConverter
                         $cellNodes[] = $node;
                     }
                 }
+                $this->inTableCell = $prevInCell;
                 if (empty($cellNodes)) {
                     $cellNodes[] = ['type' => 'paragraph', 'attrs' => ['textAlign' => null, 'dir' => $tableDir ?? ($this->defaultRtl ? 'rtl' : null)], 'content' => []];
                 }
@@ -1097,6 +1223,16 @@ class TipTapConverter
         [$mt, $mb] = $this->paragraphMargins($pStyle);
         if ($mt !== null) $attrs['marginTop'] = $mt;
         if ($mb !== null) $attrs['marginBottom'] = $mb;
+        // Default body line-height (1.7) for regular paragraphs. Skip for
+        // table cells (kept compact) and TOC entries (own layout). Headings
+        // strip this back out in buildHeadingNode().
+        if (!isset($attrs['lineHeight']) && !$this->inTableCell) {
+            $styleName = (is_object($pStyle) && method_exists($pStyle, 'getStyleName'))
+                ? (string) $pStyle->getStyleName() : '';
+            if (strncasecmp($styleName, 'TOC', 3) !== 0) {
+                $attrs['lineHeight'] = 1.7;
+            }
+        }
         return $attrs;
     }
 
