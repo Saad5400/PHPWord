@@ -9,6 +9,11 @@ $out = $argv[2] ?? __DIR__ . '/../output/v2.json';
 
 $start = microtime(true);
 $config = new \PhpWord\TipTap\ConverterConfig();
+// Page-10 وثائق العقد list (numId=61) is the only arabicAbjad list in the
+// reference doc that renders as Arabic-letter markers (ا./ب./ج./...يا.).
+// All other arabicAbjad lists in this doc render as Arabic-Indic digits, so
+// they stay on the default ordered-list path.
+$config->bakeArabicLetterMarkersForNumIds = [61];
 $conv = new \PhpWord\TipTap\TipTapConverter($config);
 $doc = $conv->convertFile($src);
 if ($conv->config->arabicIndicNumerals) {

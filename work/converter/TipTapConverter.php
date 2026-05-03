@@ -917,14 +917,14 @@ class TipTapConverter
         if ($this->config->defaultRtl || $this->paragraphDir($firstTopItem->getParagraphStyle()) === 'rtl') {
             $rootAttrs['dir'] = 'rtl';
         }
-        // Top-level Arabic-alpha lists need their default marker suppressed
+        // Top-level Arabic-letter lists (arabicAlpha always; arabicAbjad
+        // when its numId is opted-in) need their default marker suppressed
         // so the baked-in "ا. ", "ب. " prefix isn't doubled by the browser's
-        // decimal counter. arabicAbjad — despite the abjad name — is treated
-        // by the source as a numeric list (rendered as ١./٢./٣. via the
-        // Arabic-Indic post-process pass), so it stays on the default
-        // ordered-list path.
+        // decimal counter. Other arabicAbjad lists stay on the default
+        // ordered-list path so the Arabic-Indic post-pass can stamp ١./٢./٣..
         $topFmt = $this->listLevelNumFmt($firstTopItem, 0);
-        if ($topFmt === 'arabicAlpha') {
+        $topBakesLetters = $this->shouldBakeArabicLetters($firstTopItem, 0);
+        if ($topBakesLetters) {
             $rootAttrs['markerStyle'] = 'none';
         }
         if (!empty($rootAttrs)) $rootNode['attrs'] = $rootAttrs;
@@ -934,6 +934,7 @@ class TipTapConverter
         $stack = [[
             'list' => &$rootNode,
             'fmt' => $topFmt,
+            'bakeLetters' => $topBakesLetters,
             'counter' => 0,
         ]];
 
@@ -959,10 +960,11 @@ class TipTapConverter
                 $lastIdx = count($parent['content']) - 1;
                 $childType = $this->listTypeFor($item, $depth);
                 $childFmt = $this->listLevelNumFmt($item, $depth);
+                $childBakesLetters = $this->shouldBakeArabicLetters($item, $depth);
                 $newList = ['type' => $childType, 'content' => []];
                 $newAttrs = [];
                 if ($this->config->defaultRtl) $newAttrs['dir'] = 'rtl';
-                if ($childFmt === 'arabicAlpha') {
+                if ($childBakesLetters) {
                     $newAttrs['markerStyle'] = 'none';
                 }
                 if (!empty($newAttrs)) $newList['attrs'] = $newAttrs;
@@ -970,6 +972,7 @@ class TipTapConverter
                 $stack[] = [
                     'list' => &$newList,
                     'fmt' => $childFmt,
+                    'bakeLetters' => $childBakesLetters,
                     'counter' => 0,
                 ];
                 unset($newList);
@@ -980,8 +983,8 @@ class TipTapConverter
             // letter as a text node — the marker is baked in because
             // browsers don't render `arabic-indic` letters from `list-style`.
             $inline = $this->convertInlineRun($item);
-            $levelFmt = $stack[$depth]['fmt'] ?? null;
-            if ($levelFmt === 'arabicAlpha') {
+            $levelBakes = $stack[$depth]['bakeLetters'] ?? false;
+            if ($levelBakes) {
                 $stack[$depth]['counter']++;
                 $letter = $this->arabicAbjadLetter($stack[$depth]['counter']);
                 if ($letter !== '') {
@@ -1025,6 +1028,26 @@ class TipTapConverter
     }
 
     /**
+     * True when the given list level should bake Arabic-letter markers
+     * (ا./ب./ج./...) into each item's text. Triggers on `arabicAlpha`
+     * unconditionally; on `arabicAbjad` only when the item's numId is in
+     * `ConverterConfig::$bakeArabicLetterMarkersForNumIds`. arabicAbjad
+     * is opt-in because some documents use it for arabic-indic numeric
+     * lists (despite the OOXML name implying letters).
+     */
+    private function shouldBakeArabicLetters(ListItemRun $item, int $depth): bool
+    {
+        $fmt = $this->listLevelNumFmt($item, $depth);
+        if ($fmt === 'arabicAlpha') return true;
+        if ($fmt !== 'arabicAbjad') return false;
+        $style = $item->getStyle();
+        if (!$style instanceof ListItemStyle) return false;
+        $numId = method_exists($style, 'getNumId') ? $style->getNumId() : null;
+        if ($numId === null) return false;
+        return in_array((int) $numId, $this->config->bakeArabicLetterMarkersForNumIds, true);
+    }
+
+    /**
      * Look up the OOXML numFmt for a list item's level (e.g. "decimal",
      * "lowerLetter", "arabicAlpha", "arabicAbjad", "bullet"). Returns null
      * when the item carries no numbering definition.
@@ -1063,7 +1086,11 @@ class TipTapConverter
     {
         static $alphabet = ['ا','ب','ج','د','ه','و','ز','ح','ط','ي','ك','ل','م','ن','س','ع','ف','ص','ق','ر','ش','ت','ث','خ','ذ','ض','ظ','غ'];
         if ($n <= 0) return '';
-        if ($n <= count($alphabet)) return $alphabet[$n - 1];
+        if ($n <= 10) return $alphabet[$n - 1];
+        // Composite letters past 10: 11=يا, 12=يب, … 19=يط, 20=ك,
+        // 21=كا, … keyed off the next ten-prefix (ي for 11–19, ك for 20–29).
+        if ($n < 20) return 'ي' . $this->arabicAbjadLetter($n - 10);
+        if ($n < 30) return 'ك' . $this->arabicAbjadLetter($n - 20);
         return (string) $n;
     }
 

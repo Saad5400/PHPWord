@@ -65,6 +65,22 @@ class ConverterConfig
     public bool $dropEmptyParagraphs = true;
 
     /**
+     * Word numIds whose `arabicAbjad` lists should bake Arabic-letter markers
+     * (ا./ب./ج./...) into each item's text content. Other arabicAbjad lists
+     * are treated as numeric and rendered via the Arabic-Indic post-pass.
+     *
+     * Why opt-in: `arabicAbjad` lists in our corpus often render as
+     * Arabic-Indic digits in the source PDF despite the OOXML name implying
+     * letters, so the safe default is numeric. List the numIds that genuinely
+     * want letter markers per the source document's reference rendering.
+     *
+     * `arabicAlpha` lists always bake letters (no opt-in needed).
+     *
+     * @var int[]
+     */
+    public array $bakeArabicLetterMarkersForNumIds = [];
+
+    /**
      * Rename emitted TipTap node types. Useful when a downstream plugin
      * expects a different schema name — e.g. swap `pageBreak` for
      * `customPageBreak`, or alias `table` to a fork's renamed node type.
